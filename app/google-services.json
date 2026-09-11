@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "592188217714",
+    "project_id": "asicme-casco-a9976",
+    "storage_bucket": "asicme-casco-a9976.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:592188217714:android:03b5794933048158c065eb",
+        "android_client_info": {
+          "package_name": "com.example.appcasco"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBM60WvWiTBUikQUe79z-1lKmhUCF6qWcM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

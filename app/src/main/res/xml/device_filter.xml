@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Coincide con dispositivos de clase de Video (UVC) -->
+    <usb-interface class="14" /> <!-- 14 decimal = 0x0E = Video -->
+</resources>

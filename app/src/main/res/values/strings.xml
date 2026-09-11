@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">asicMeCasco</string>
+    <string name="agent_header">Agente</string>
+    <string name="transmit_button">Transmitir</string>
+    <string name="disconnect_button">Desconectar</string>
+    <string name="streaming_status">Transmitiendo video...</string>
+</resources>
