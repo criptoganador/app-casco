@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: cascos-app-pc
+    runtime: node
+    plan: free
+    buildCommand: npm install -g pnpm && pnpm install && pnpm build
+    startCommand: pnpm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NEXT_PUBLIC_LIVEKIT_URL
+        value: wss://asicme-casco-xlxbe39o.livekit.cloud
+      - key: NEXT_PUBLIC_LIVEKIT_API
+        value: https://asicme-casco-xlxbe39o.livekit.cloud
+      - key: NEXT_PUBLIC_LIVEKIT_API_KEY
+        value: APIutSnBDwPrHSM
+      - key: NEXT_PUBLIC_DEFAULT_ROOM
+        value: jhoan
+      - key: LIVEKIT_API_SECRET
+        sync: false

@@ -39,6 +39,16 @@ export async function buildLiveKitToken(claims: Record<string, unknown>, secretK
  * Token para consultar lista de salas activas vía API Twirp.
  */
 export async function createAdminToken(): Promise<string> {
+  try {
+    const res = await fetch('/api/livekit/token?type=admin')
+    if (res.ok) {
+      const data = await res.json()
+      if (data.token) return data.token
+    }
+  } catch (err) {
+    console.warn('[Token] Error obteniendo admin token del servidor, usando fallback local:', err)
+  }
+
   const now = Math.floor(Date.now() / 1000)
   return buildLiveKitToken({
     iss: LIVEKIT_CONFIG.apiKey,
@@ -53,6 +63,16 @@ export async function createAdminToken(): Promise<string> {
  * Token de espectador para unirse a una sala y publicar micrófono.
  */
 export async function createViewerToken(roomName: string): Promise<string> {
+  try {
+    const res = await fetch(`/api/livekit/token?room=${encodeURIComponent(roomName)}&type=viewer`)
+    if (res.ok) {
+      const data = await res.json()
+      if (data.token) return data.token
+    }
+  } catch (err) {
+    console.warn('[Token] Error obteniendo viewer token del servidor, usando fallback local:', err)
+  }
+
   const now = Math.floor(Date.now() / 1000)
   return buildLiveKitToken({
     iss: LIVEKIT_CONFIG.apiKey,
