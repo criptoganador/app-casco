@@ -923,6 +923,19 @@
 
                 function attachTrack(track, participant) {
                     const identity = participant ? participant.identity : 'remoto';
+
+                    // 1. Evitar reproducir pistas locales (previene que el operador se escuche a sí mismo)
+                    if (participant && (participant.isLocal || participant.identity === room.localParticipant?.identity)) {
+                        console.log('🔇 Ignorando pista de audio/video propia para evitar auto-escucha');
+                        return;
+                    }
+
+                    // 2. Evitar reproducir audio de otros monitores de PC (previene bucles y retroalimentación)
+                    if (identity && identity.startsWith('monitor-pc-')) {
+                        console.log('🔇 Ignorando audio de monitor PC:', identity);
+                        return;
+                    }
+
                     if (track.kind === LivekitClient.Track.Kind.Video || track.kind === 'video') {
                         console.log('✅ Pista de VIDEO recibida de:', identity);
                         track.attach(videoEl);
@@ -931,7 +944,7 @@
                         setStatus('online', `Transmitiendo en vivo: ${cleanRoom} (${identity})`);
 
                     } else if (track.kind === LivekitClient.Track.Kind.Audio || track.kind === 'audio') {
-                        console.log('✅ Pista de AUDIO recibida de:', identity);
+                        console.log('✅ Pista de AUDIO recibida del casco/agente:', identity);
 
                         // Desvincular del elemento anterior si existía
                         audioElements.forEach(el => { try { track.detach(el); } catch(e){} });
@@ -943,7 +956,7 @@
                         document.body.appendChild(audioEl);
                         audioElements.push(audioEl);
 
-                        console.log('Elemento de audio creado:', audioEl.id, '- intentando reproducir...');
+                        console.log('Elemento de audio creado:', audioEl.id, '- reproduciendo audio remoto...');
                         playAudioElement(audioEl);
                     }
                 }
@@ -1008,7 +1021,11 @@
                 // Si el micrófono estaba activo antes de reconectar, restaurarlo
                 if (localMicEnabled) {
                     try {
-                        await room.localParticipant.setMicrophoneEnabled(true);
+                        await room.localParticipant.setMicrophoneEnabled(true, {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        });
                         console.log('✅ Micrófono PC restaurado tras reconexión');
                     } catch(e) {
                         console.warn('No se pudo restaurar micrófono:', e);
@@ -1214,8 +1231,15 @@
                 const selectedDeviceId = micSelect && micSelect.value ? micSelect.value : undefined;
 
                 if (localMicEnabled) {
-                    // Activar micrófono del headset y publicarlo hacia LiveKit SFU
-                    const captureOptions = selectedDeviceId ? { deviceId: selectedDeviceId } : undefined;
+                    // Activar micrófono del headset con cancelación de eco (AEC) y supresión de ruido (NS)
+                    const captureOptions = {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    };
+                    if (selectedDeviceId) {
+                        captureOptions.deviceId = { exact: selectedDeviceId };
+                    }
                     const pub = await currentRoom.localParticipant.setMicrophoneEnabled(true, captureOptions);
                     updateMicButton(true);
                     if (badge) badge.style.display = 'flex';
