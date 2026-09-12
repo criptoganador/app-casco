@@ -47,6 +47,10 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_LOCATION"
         tools:targetApi="34" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"
+        tools:targetApi="34" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!-- Notificaciones (Android 13+) -->
     <uses-permission
@@ -82,7 +86,7 @@
             android:name=".CameraStreamService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="camera|connectedDevice|microphone" />
+            android:foregroundServiceType="camera|connectedDevice|microphone|location|phoneCall" />
     </application>
 
 </manifest>

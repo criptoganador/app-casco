@@ -118,6 +118,7 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
                 Toast.makeText(this, "Please enter a room name", Toast.LENGTH_SHORT).show();
                 return;
             }
+            checkBatteryOptimizations();
             startCameraService(detectedCamera, roomName);
         });
 
@@ -262,6 +263,23 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         } else if (requestCode == CAMERA_MIC_PERMISSION_REQUEST_CODE) {
             if (!(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
                 Toast.makeText(this, "Camera and Microphone permissions are required.", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void checkBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                    Log.d(TAG, "Solicitando omitir optimizaciones de batería para ejecución continua en segundo plano...");
+                    @SuppressLint("BatteryLife")
+                    Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Aviso solicitando exclusión de optimización de batería:", e);
             }
         }
     }

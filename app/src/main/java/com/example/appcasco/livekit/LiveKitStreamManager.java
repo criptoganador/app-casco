@@ -16,6 +16,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import com.example.appcasco.audio.AudioRouteManager;
+import com.example.appcasco.network.NetworkConnectionManager;
+
 import kotlinx.coroutines.BuildersKt;
 import kotlinx.coroutines.CoroutineScope;
 import kotlinx.coroutines.Dispatchers;
@@ -45,12 +48,15 @@ import io.livekit.android.room.track.RemoteAudioTrack;
 import io.livekit.android.room.track.RemoteTrackPublication;
 import io.livekit.android.room.track.Track;
 import io.livekit.android.room.track.TrackPublication;
+import io.livekit.android.room.track.VideoCaptureParameter;
+import io.livekit.android.room.track.VideoEncoding;
 import kotlin.Result;
 import kotlin.Unit;
 import kotlin.coroutines.Continuation;
 import kotlin.coroutines.CoroutineContext;
 import kotlin.coroutines.EmptyCoroutineContext;
 import livekit.org.webrtc.JavaI420Buffer;
+import livekit.org.webrtc.RtpParameters;
 import livekit.org.webrtc.VideoFrame;
 
 /**
@@ -81,16 +87,84 @@ public class LiveKitStreamManager {
     private LocalVideoTrack localVideoTrack;
     private volatile boolean isConnected = false;
     private Job roomEventsJob = null; // Job para cancelar la colección de eventos al detener
+    private final AudioRouteManager audioRouteManager;
+    private final NetworkConnectionManager networkManager;
+    private String currentRoomName = null;
+    private volatile boolean isExplicitlyStopped = false;
 
     public LiveKitStreamManager(Context context, Events events) {
         this.context = context.getApplicationContext();
         this.events = events;
+        this.audioRouteManager = new AudioRouteManager(this.context);
+        this.networkManager = new NetworkConnectionManager(this.context);
+        setupNetworkListener();
+    }
+
+    private void setupNetworkListener() {
+        this.networkManager.setListener(new NetworkConnectionManager.NetworkStateListener() {
+            @Override
+            public void onNetworkAvailable(@NonNull NetworkConnectionManager.NetworkState state) {
+                Log.d(TAG, "📡 [Red] Disponible: " + state.typeName);
+                if (currentRoomName != null && !isExplicitlyStopped && (!isConnected || (room != null && room.getState() == Room.State.DISCONNECTED))) {
+                    Log.i(TAG, "Reanudando sesión LiveKit tras disponibilidad de red...");
+                    reconnectStream();
+                }
+            }
+
+            @Override
+            public void onNetworkLost() {
+                Log.w(TAG, "⚠️ [Red] Pérdida de red detectada mientras se transmitía.");
+                if (currentRoomName != null && !isExplicitlyStopped) {
+                    networkManager.scheduleExponentialReconnect(() -> {
+                        if (currentRoomName != null && !isExplicitlyStopped && (!isConnected || (room != null && room.getState() == Room.State.DISCONNECTED))) {
+                            reconnectStream();
+                        }
+                    });
+                }
+            }
+
+            @Override
+            public void onNetworkValidated(@NonNull NetworkConnectionManager.NetworkState state) {
+                Log.i(TAG, "🌍 [Red] Acceso a Internet VALIDADO por Google DNS: " + state.typeName);
+                if (currentRoomName != null && !isExplicitlyStopped && (!isConnected || (room != null && room.getState() == Room.State.DISCONNECTED))) {
+                    reconnectStream();
+                }
+            }
+
+            @Override
+            public void onHandover(@NonNull NetworkConnectionManager.NetworkState oldState, @NonNull NetworkConnectionManager.NetworkState newState) {
+                Log.i(TAG, "🔄 [Red] Handover detectado: " + oldState.typeName + " ➔ " + newState.typeName);
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (currentRoomName != null && !isExplicitlyStopped && room != null && room.getState() == Room.State.DISCONNECTED) {
+                        Log.w(TAG, "Sala desconectada tras cambio de interfaz (Handover). Reconectando...");
+                        reconnectStream();
+                    }
+                }, 3500);
+            }
+        });
+    }
+
+    private void reconnectStream() {
+        if (currentRoomName == null || isExplicitlyStopped) return;
+        Log.i(TAG, "⚡ Ejecutando reconexión automática a la sala: " + currentRoomName);
+        startStream(currentRoomName);
+    }
+
+    public AudioRouteManager getAudioRouteManager() {
+        return audioRouteManager;
+    }
+
+    public NetworkConnectionManager getNetworkManager() {
+        return networkManager;
     }
 
     /**
      * Inicia la conexión a LiveKit Cloud en la sala especificada y publica el video.
      */
     public void startStream(final String roomName) {
+        this.currentRoomName = roomName;
+        this.isExplicitlyStopped = false;
+        this.networkManager.startMonitoring();
         executor.execute(new Runnable() {
             @Override
             public void run() {
@@ -115,12 +189,18 @@ public class LiveKitStreamManager {
                             true,  // highPassFilter
                             false  // typingNoiseDetection
                     );
-                    RoomOptions roomOptions = new RoomOptions(
-                            false,
+                    LocalVideoTrackOptions videoCaptureDefaults = new LocalVideoTrackOptions(
                             false,
                             null,
+                            null,
+                            new VideoCaptureParameter(1280, 720, 30, true)
+                    );
+                    RoomOptions roomOptions = new RoomOptions(
+                            true,   // adaptiveStream activado para optimizar consumo y latencia
+                            true,   // dynacast activado: pausa resolución HD si ningún suscriptor la solicita
+                            null,
                             audioCaptureDefaults,
-                            new LocalVideoTrackOptions(),
+                            videoCaptureDefaults,
                             new AudioTrackPublishDefaults(),
                             new VideoTrackPublishDefaults(),
                             new LocalVideoTrackOptions(),
@@ -146,6 +226,8 @@ public class LiveKitStreamManager {
                             } else {
                                 Log.d(TAG, "¡Conectado exitosamente a LiveKit Cloud!");
                                 isConnected = true;
+                                // Iniciar gestión profesional de audio y detección de desconexiones
+                                audioRouteManager.startCallAudio();
                                 configureAudioOutput();
                                 // Suscribirse a eventos de la sala para recibir audio remoto de la PC
                                 startRoomEventsCollection();
@@ -171,10 +253,31 @@ public class LiveKitStreamManager {
         if (localParticipant == null) return;
 
         try {
-            localVideoTrack = localParticipant.createVideoTrack("camera", uvcCapturer, new LocalVideoTrackOptions(), null);
+            LocalVideoTrackOptions videoTrackOptions = new LocalVideoTrackOptions(
+                    false,
+                    null,
+                    null,
+                    new VideoCaptureParameter(1280, 720, 30, true)
+            );
+            localVideoTrack = localParticipant.createVideoTrack("camera", uvcCapturer, videoTrackOptions, null);
             localVideoTrack.startCapture();
             Log.d(TAG, "LocalVideoTrack creado e inicializado con startCapture()");
-            VideoTrackPublishOptions pubOptions = new VideoTrackPublishOptions();
+
+            // Opciones de publicación profesionales:
+            // - Simulcast multicapa activado (alta, media, baja) para evitar cuellos de botella
+            // - Codec VP8 acelerado por hardware WebRTC
+            // - DegradationPreference: MAINTAIN_FRAMERATE para priorizar fluidez y mínima latencia sobre resolución
+            VideoTrackPublishOptions pubOptions = new VideoTrackPublishOptions(
+                    "camera",
+                    new VideoEncoding(1_500_000, 30),
+                    true,
+                    "VP8",
+                    null,
+                    null,
+                    Track.Source.CAMERA,
+                    null,
+                    RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            );
 
             localParticipant.publishVideoTrack(
                     localVideoTrack,
@@ -305,6 +408,17 @@ public class LiveKitStreamManager {
                     }
                     Log.d(TAG, "⏹ [AUDIO REMOTO DETENIDO]");
                 });
+            }
+        } else if (event instanceof RoomEvent.Reconnecting) {
+            Log.w(TAG, "🔄 LiveKit SDK reconectando socket internamente...");
+        } else if (event instanceof RoomEvent.Reconnected) {
+            Log.i(TAG, "✅ LiveKit SDK reconectado exitosamente.");
+            if (events != null) events.onConnected();
+            subscribeToExistingRemoteTracks();
+        } else if (event instanceof RoomEvent.Disconnected) {
+            Log.w(TAG, "LiveKit sala desconectada.");
+            if (currentRoomName != null && !isExplicitlyStopped && networkManager.isInternetValidated()) {
+                networkManager.scheduleExponentialReconnect(this::reconnectStream);
             }
         }
     }
@@ -440,9 +554,18 @@ public class LiveKitStreamManager {
      */
     public void stopStream() {
         isConnected = false;
+        isExplicitlyStopped = true;
+        currentRoomName = null;
+        if (networkManager != null) {
+            networkManager.cancelPendingReconnect();
+            networkManager.stopMonitoring();
+        }
         if (roomEventsJob != null) {
             roomEventsJob.cancel(null);
             roomEventsJob = null;
+        }
+        if (audioRouteManager != null) {
+            audioRouteManager.stopCallAudio();
         }
         try {
             android.media.AudioManager audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);

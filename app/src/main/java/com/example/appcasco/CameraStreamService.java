@@ -3,6 +3,7 @@ package com.example.appcasco;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -70,11 +71,15 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     public void setPreviewSurface(Surface surface) {
         this.previewSurface = surface;
         if (uvcCamera != null && isPreviewRunning) {
-            if (previewSurface != null && previewSurface.isValid()) {
-                uvcCamera.setPreviewDisplay(previewSurface);
-            } else {
-                uvcCamera.stopPreview();
-                isPreviewRunning = false;
+            try {
+                if (previewSurface != null && previewSurface.isValid()) {
+                    uvcCamera.setPreviewDisplay(previewSurface);
+                } else {
+                    // Desvincular la Surface visual sin detener la captura continua del sensor ni el envío a LiveKit
+                    uvcCamera.setPreviewDisplay((Surface) null);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Aviso ajustando PreviewDisplay de UVC:", e);
             }
         }
     }
@@ -119,16 +124,23 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
                 handleStopAction("Nombre de sala no especificado");
                 return START_NOT_STICKY;
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                int serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL;
+                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId), serviceType);
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 int serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA |
                                   android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
                                   android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
                 }
-                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId), serviceType);
+                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId), serviceType);
             } else {
-                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId));
+                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId));
             }
 
             // Iniciar seguimiento continuo de ubicación GPS
@@ -150,7 +162,8 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
         } else if (ACTION_STOP.equals(action)) {
             handleStopAction("Transmisión detenida por el usuario");
         }
-        return START_NOT_STICKY;
+        // START_STICKY asegura que si el sistema mata el servicio por presión de memoria, intente recrearlo
+        return START_STICKY;
     }
 
     private void openCamera(USBMonitor.UsbControlBlock ctrlBlock) {
@@ -279,8 +292,17 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID, "Transmisión de Cámara", NotificationManager.IMPORTANCE_LOW);
-            getSystemService(NotificationManager.class).createNotificationChannel(channel);
+                    NOTIFICATION_CHANNEL_ID,
+                    "Llamada y Transmisión del Casco",
+                    NotificationManager.IMPORTANCE_HIGH
+            );
+            channel.setDescription("Mantiene la transmisión de video, audio bidireccional y GPS activa en segundo plano");
+            channel.setShowBadge(true);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
         }
     }
 
@@ -292,11 +314,39 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     }
 
     private Notification createNotification(String text) {
+        // Intent para volver a MainActivity al tocar la notificación
+        Intent launchIntent = new Intent(this, MainActivity.class);
+        launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent contentPendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        // Acción rápida para colgar/detener la transmisión desde la barra de notificaciones
+        Intent stopIntent = new Intent(this, CameraStreamService.class);
+        stopIntent.setAction(ACTION_STOP);
+        PendingIntent stopPendingIntent = PendingIntent.getService(
+                this,
+                1,
+                stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
         return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-                .setContentTitle("Casco Inteligente Activo")
+                .setContentTitle("Casco Inteligente — Transmisión Activa")
                 .setContentText(text)
+                .setSubText(roomId != null ? "Sala: " + roomId : null)
                 .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentIntent(contentPendingIntent)
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "🛑 Detener", stopPendingIntent)
                 .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setShowWhen(true)
+                .setUsesChronometer(true)
                 .build();
     }
 }
