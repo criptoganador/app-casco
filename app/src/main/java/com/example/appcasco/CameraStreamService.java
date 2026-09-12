@@ -21,6 +21,7 @@ import androidx.core.app.NotificationCompat;
 
 import com.example.appcasco.livekit.LiveKitStreamManager;
 import com.example.appcasco.util.CompatIntent;
+import com.example.appcasco.util.LocationTracker;
 import com.example.appcasco.webrtc.FrameConverter;
 import com.serenegiant.usb.IFrameCallback;
 import com.serenegiant.usb.USBMonitor;
@@ -53,6 +54,7 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     private Surface previewSurface;
 
     private LiveKitStreamManager liveKitManager;
+    private LocationTracker locationTracker;
     private String roomId;
 
     private ByteBuffer i420_y, i420_u, i420_v;
@@ -117,7 +119,26 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
                 handleStopAction("Nombre de sala no especificado");
                 return START_NOT_STICKY;
             }
-            startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId));
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                int serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
+                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                }
+                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId), serviceType);
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId));
+            }
+
+            // Iniciar seguimiento continuo de ubicación GPS
+            if (locationTracker != null) locationTracker.stop();
+            locationTracker = new LocationTracker(this, location -> {
+                if (liveKitManager != null) {
+                    liveKitManager.sendLocation(location);
+                }
+            });
+            locationTracker.start();
             final UsbDevice device = CompatIntent.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice.class);
             if (device != null) {
                 usbMonitor.requestPermission(device);
@@ -189,6 +210,10 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     private void handleStopAction(String reason) {
         Log.d(TAG, "Deteniendo servicio de streaming. Razón: " + reason);
         releaseWakeLock();
+        if (locationTracker != null) {
+            locationTracker.stop();
+            locationTracker = null;
+        }
         stopLiveKit();
         stopCamera();
 

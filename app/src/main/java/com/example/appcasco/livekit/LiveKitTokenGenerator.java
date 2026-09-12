@@ -46,7 +46,7 @@ public final class LiveKitTokenGenerator {
             video.put("room", roomName);
             video.put("roomJoin", true);
             video.put("canPublish", true);
-            video.put("canSubscribe", false);
+            video.put("canSubscribe", true);
             payload.put("video", video);
 
             String encHeader = base64Url(header.toString().getBytes(StandardCharsets.UTF_8));

@@ -229,10 +229,26 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
     }
 
     private void ensureCameraAndMicPermissions() {
-        String[] permissions = {Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO};
-        if (ContextCompat.checkSelfPermission(this, permissions[0]) != PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, permissions[1]) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, permissions, CAMERA_MIC_PERMISSION_REQUEST_CODE);
+        java.util.List<String> permsList = new java.util.ArrayList<>();
+        permsList.add(Manifest.permission.CAMERA);
+        permsList.add(Manifest.permission.RECORD_AUDIO);
+        permsList.add(Manifest.permission.MODIFY_AUDIO_SETTINGS);
+        permsList.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        permsList.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permsList.add(Manifest.permission.BLUETOOTH_CONNECT);
+        }
+
+        java.util.List<String> needed = new java.util.ArrayList<>();
+        for (String perm : permsList) {
+            if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(perm);
+            }
+        }
+
+        if (!needed.isEmpty()) {
+            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), CAMERA_MIC_PERMISSION_REQUEST_CODE);
         }
     }
 

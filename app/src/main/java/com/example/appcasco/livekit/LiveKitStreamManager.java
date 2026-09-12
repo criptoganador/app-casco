@@ -1,12 +1,18 @@
 package com.example.appcasco.livekit;
 
 import android.content.Context;
+import android.location.Location;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 
+import org.json.JSONObject;
+
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -17,6 +23,7 @@ import io.livekit.android.RoomOptions;
 import io.livekit.android.room.Room;
 import io.livekit.android.room.participant.LocalParticipant;
 import io.livekit.android.room.participant.VideoTrackPublishOptions;
+import io.livekit.android.room.track.DataPublishReliability;
 import io.livekit.android.room.track.LocalVideoTrack;
 import io.livekit.android.room.track.LocalVideoTrackOptions;
 import io.livekit.android.room.track.TrackPublication;
@@ -100,6 +107,7 @@ public class LiveKitStreamManager {
                             } else {
                                 Log.d(TAG, "¡Conectado exitosamente a LiveKit Cloud!");
                                 isConnected = true;
+                                configureAudioOutput();
                                 if (events != null) events.onConnected();
                                 publishTrack();
                             }
@@ -154,6 +162,29 @@ public class LiveKitStreamManager {
                         }
                     }
             );
+
+            // Habilitar y publicar audio del micrófono en LiveKit (debe correr en hilo principal)
+            new Handler(Looper.getMainLooper()).post(() -> {
+                Log.d(TAG, "Habilitando micrófono en hilo principal...");
+                localParticipant.setMicrophoneEnabled(true, new Continuation<Unit>() {
+                    @NonNull
+                    @Override
+                    public CoroutineContext getContext() {
+                        return EmptyCoroutineContext.INSTANCE;
+                    }
+
+                    @Override
+                    public void resumeWith(@NonNull Object result) {
+                        if (result instanceof Result.Failure) {
+                            Throwable ex = ((Result.Failure) result).exception;
+                            Log.e(TAG, "ERROR habilitando micrófono en LiveKit: " + (ex != null ? ex.getMessage() : "desconocido"), ex);
+                        } else {
+                            Log.d(TAG, "¡MICRÓFONO ACTIVO! Audio transmitiendo en LiveKit (altavoces/manos libres/Bluetooth)");
+                        }
+                    }
+                });
+            });
+
         } catch (Exception e) {
             Log.e(TAG, "Error creando o publicando LocalVideoTrack", e);
             if (events != null) events.onError("Error publicando video: " + e.getMessage());
@@ -188,11 +219,89 @@ public class LiveKitStreamManager {
         }
     }
 
+    private void configureAudioOutput() {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                android.media.AudioManager audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+                if (audioManager != null) {
+                    audioManager.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
+                    // Si no tiene auriculares conectados por cable ni bluetooth, activar altavoz para que se escuche fuerte
+                    if (!audioManager.isWiredHeadsetOn() && !audioManager.isBluetoothA2dpOn() && !audioManager.isBluetoothScoOn()) {
+                        audioManager.setSpeakerphoneOn(true);
+                        Log.d(TAG, "Altavoz activado para recepción de audio de la PC");
+                    }
+                    int maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL);
+                    int curVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL);
+                    if (curVol < (int)(maxVol * 0.7)) {
+                        audioManager.setStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL, (int)(maxVol * 0.85), 0);
+                    }
+                    Log.d(TAG, "Audio de comunicación configurado exitosamente");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Aviso configurando salida de audio:", e);
+            }
+        });
+    }
+
+    /**
+     * Envía las coordenadas GPS del celular en tiempo real a los observadores en la PC
+     * utilizando el WebRTC DataChannel de LiveKit con baja latencia y alta confiabilidad.
+     */
+    public void sendLocation(Location location) {
+        if (!isConnected || room == null || location == null) return;
+        final LocalParticipant localParticipant = room.getLocalParticipant();
+        if (localParticipant == null) return;
+
+        executor.execute(() -> {
+            try {
+                JSONObject json = new JSONObject();
+                json.put("lat", location.getLatitude());
+                json.put("lng", location.getLongitude());
+                json.put("accuracy", location.hasAccuracy() ? location.getAccuracy() : 0.0f);
+                json.put("speed", location.hasSpeed() ? location.getSpeed() * 3.6f : 0.0f); // m/s a km/h
+                json.put("bearing", location.hasBearing() ? location.getBearing() : 0.0f);
+                json.put("altitude", location.hasAltitude() ? location.getAltitude() : 0.0);
+                json.put("time", location.getTime() > 0 ? location.getTime() : System.currentTimeMillis());
+
+                byte[] data = json.toString().getBytes(StandardCharsets.UTF_8);
+
+                localParticipant.publishData(
+                        data,
+                        DataPublishReliability.RELIABLE,
+                        "location",
+                        null,
+                        new Continuation<Unit>() {
+                            @NonNull
+                            @Override
+                            public CoroutineContext getContext() {
+                                return EmptyCoroutineContext.INSTANCE;
+                            }
+
+                            @Override
+                            public void resumeWith(@NonNull Object result) {
+                                // Envoltorio Continuation para compatibilidad Java con suspend function
+                            }
+                        }
+                );
+            } catch (Exception e) {
+                Log.w(TAG, "Aviso enviando datos GPS:", e);
+            }
+        });
+    }
+
     /**
      * Detiene el streaming y desconecta la sesión de LiveKit.
      */
     public void stopStream() {
         isConnected = false;
+        try {
+            android.media.AudioManager audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager != null) {
+                audioManager.setSpeakerphoneOn(false);
+                audioManager.setMode(android.media.AudioManager.MODE_NORMAL);
+            }
+        } catch (Exception ignored) {}
+
         try {
             if (localVideoTrack != null) {
                 localVideoTrack.stop();
