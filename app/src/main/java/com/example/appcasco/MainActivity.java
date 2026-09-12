@@ -39,7 +39,6 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
 
     private static final String TAG = "MainActivity";
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 1002;
-    private static final int LOCATION_PERMISSION_REQUEST_CODE = 1003;
     private static final int CAMERA_MIC_PERMISSION_REQUEST_CODE = 1004;
 
     // --- UI ---
@@ -63,7 +62,11 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
                 Log.d(TAG, "Service has stopped, updating UI.");
                 isStreaming = false;
                 updateUi(false);
-                Toast.makeText(context, "Camera disconnected or stream stopped.", Toast.LENGTH_LONG).show();
+                String reason = intent.getStringExtra(CameraStreamService.EXTRA_ERROR_MESSAGE);
+                if (TextUtils.isEmpty(reason)) {
+                    reason = "Transmisión detenida.";
+                }
+                Toast.makeText(context, reason, Toast.LENGTH_LONG).show();
             }
         }
     };
@@ -103,7 +106,6 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         cameraView.setSurfaceTextureListener(this);
         // Inicialización de permisos
         ensureNotificationPermission();
-        ensureLocationPermission();
         ensureCameraAndMicPermissions();
 
         transmitButton.setOnClickListener(v -> {
@@ -111,7 +113,7 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
                 Toast.makeText(this, "No USB camera detected", Toast.LENGTH_SHORT).show();
                 return;
             }
-            String roomName = roomNameInput.getText().toString();
+            String roomName = roomNameInput.getText() != null ? roomNameInput.getText().toString().trim() : "";
             if (TextUtils.isEmpty(roomName)) {
                 Toast.makeText(this, "Please enter a room name", Toast.LENGTH_SHORT).show();
                 return;
@@ -226,12 +228,6 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         }
     }
 
-    private void ensureLocationPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST_CODE);
-        }
-    }
-
     private void ensureCameraAndMicPermissions() {
         String[] permissions = {Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO};
         if (ContextCompat.checkSelfPermission(this, permissions[0]) != PackageManager.PERMISSION_GRANTED ||
@@ -246,10 +242,6 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
             if (!(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
                 Toast.makeText(this, "Notification permission denied.", Toast.LENGTH_LONG).show();
-            }
-        } else if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
-            if (!(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
-                Toast.makeText(this, "Location permission denied. Location will not be sent.", Toast.LENGTH_LONG).show();
             }
         } else if (requestCode == CAMERA_MIC_PERMISSION_REQUEST_CODE) {
             if (!(grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {

@@ -19,28 +19,27 @@ import android.view.Surface;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import com.example.appcasco.signaling.FirestoreSignaling;
+import com.example.appcasco.livekit.LiveKitStreamManager;
 import com.example.appcasco.util.CompatIntent;
 import com.example.appcasco.webrtc.FrameConverter;
-import com.example.appcasco.webrtc.WebRtcClient;
-import com.google.firebase.auth.FirebaseAuth;
 import com.serenegiant.usb.IFrameCallback;
 import com.serenegiant.usb.USBMonitor;
 import com.serenegiant.usb.UVCCamera;
 
-import org.webrtc.IceCandidate;
-import org.webrtc.PeerConnection;
-import org.webrtc.SessionDescription;
-
 import java.nio.ByteBuffer;
 
-// CLASE: Asegúrate de que todos los métodos estén dentro de este bloque
-public class CameraStreamService extends Service implements WebRtcClient.Events, FirestoreSignaling.Listener {
+
+/**
+ * Foreground Service para captura de cámara externa USB (UVC)
+ * y transmisión en tiempo real hacia LiveKit Cloud (SFU).
+ */
+public class CameraStreamService extends Service implements LiveKitStreamManager.Events {
 
     public static final String ACTION_START = "com.example.app.ACTION_START";
     public static final String ACTION_STOP  = "com.example.app.ACTION_STOP";
     public static final String ACTION_SERVICE_STOPPED = "com.example.app.ACTION_SERVICE_STOPPED";
     public static final String EXTRA_ROOM_ID = "com.example.app.EXTRA_ROOM_ID";
+    public static final String EXTRA_ERROR_MESSAGE = "com.example.app.EXTRA_ERROR_MESSAGE";
 
     private static final String TAG = "CameraStreamService";
     private static final String NOTIFICATION_CHANNEL_ID = "CameraServiceChannel";
@@ -53,9 +52,7 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
     private boolean isPreviewRunning = false;
     private Surface previewSurface;
 
-    private FirebaseAuth mAuth;
-    private WebRtcClient webRtcClient;
-    private FirestoreSignaling firestoreSignaling;
+    private LiveKitStreamManager liveKitManager;
     private String roomId;
 
     private ByteBuffer i420_y, i420_u, i420_v;
@@ -81,7 +78,7 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
     }
 
     private final IFrameCallback frameCallback = frame -> {
-        if (frame == null || webRtcClient == null) return;
+        if (frame == null || liveKitManager == null) return;
         long timestampNs = System.nanoTime();
         if (i420_y == null) {
             i420_y = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT);
@@ -89,22 +86,21 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
             i420_v = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT / 4);
         }
         FrameConverter.nv21ToI420(frame, PREVIEW_WIDTH, PREVIEW_HEIGHT, i420_y, i420_u, i420_v);
-        webRtcClient.pushI420Frame(i420_y, i420_u, i420_v, PREVIEW_WIDTH, PREVIEW_HEIGHT, 0, timestampNs);
+        liveKitManager.pushI420Frame(i420_y, i420_u, i420_v, PREVIEW_WIDTH, PREVIEW_HEIGHT, 0, timestampNs);
     };
 
     private final USBMonitor.OnDeviceConnectListener onDeviceConnectListener = new USBMonitor.OnDeviceConnectListener() {
         @Override public void onAttach(UsbDevice d) {}
-        @Override public void onDettach(UsbDevice d) { handleStopAction(); }
+        @Override public void onDettach(UsbDevice d) { handleStopAction("Cámara USB desconectada"); }
         @Override public void onConnect(UsbDevice d, USBMonitor.UsbControlBlock cb, boolean createNew) { openCamera(cb); }
-        @Override public void onDisconnect(UsbDevice d, USBMonitor.UsbControlBlock cb) { handleStopAction(); }
+        @Override public void onDisconnect(UsbDevice d, USBMonitor.UsbControlBlock cb) { handleStopAction("Conexión USB interrumpida"); }
         @Override public void onCancel(UsbDevice d) {}
     };
 
-
     @Override public void onCreate() {
         super.onCreate();
-        mAuth = FirebaseAuth.getInstance();
         createNotificationChannel();
+        liveKitManager = new LiveKitStreamManager(this, this);
         usbMonitor = new USBMonitor(this, onDeviceConnectListener);
         usbMonitor.register();
     }
@@ -118,19 +114,20 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
             this.roomId = intent.getStringExtra(EXTRA_ROOM_ID);
             if (TextUtils.isEmpty(roomId)) {
                 Log.e(TAG, "Room ID is missing.");
-                handleStopAction();
+                handleStopAction("Nombre de sala no especificado");
                 return START_NOT_STICKY;
             }
-            startForeground(NOTIFICATION_ID, createNotification("Transmitting to room: " + roomId));
+            startForeground(NOTIFICATION_ID, createNotification("Transmitiendo a LiveKit sala: " + roomId));
             final UsbDevice device = CompatIntent.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice.class);
-            if (device != null) usbMonitor.requestPermission(device);
-            else {
+            if (device != null) {
+                usbMonitor.requestPermission(device);
+            } else {
                 Log.e(TAG, "USB Device not found in intent.");
-                handleStopAction();
+                handleStopAction("Dispositivo USB no encontrado");
             }
 
         } else if (ACTION_STOP.equals(action)) {
-            handleStopAction();
+            handleStopAction("Transmisión detenida por el usuario");
         }
         return START_NOT_STICKY;
     }
@@ -140,51 +137,38 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
         uvcCamera = new UVCCamera();
         try {
             uvcCamera.open(ctrlBlock);
-            uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.DEFAULT_PREVIEW_MODE);
+            // Intenta modo YUYV predeterminado; si falla, intenta con MJPEG
+            try {
+                uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.DEFAULT_PREVIEW_MODE);
+            } catch (Exception eYuyv) {
+                Log.w(TAG, "YUYV no soportado por la cámara, intentando MJPEG...", eYuyv);
+                uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+            }
         } catch (Exception e) {
-            Log.e(TAG, "Failed to open UVC Camera.", e);
-            handleStopAction();
+            Log.e(TAG, "Fallo al abrir cámara UVC.", e);
+            handleStopAction("Fallo al inicializar cámara UVC: " + e.getMessage());
             return;
         }
-        if (previewSurface != null) uvcCamera.setPreviewDisplay(previewSurface);
+
+        if (previewSurface != null && previewSurface.isValid()) {
+            uvcCamera.setPreviewDisplay(previewSurface);
+        }
         uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
         uvcCamera.startPreview();
         isPreviewRunning = true;
-        ensureAuthAndStartRtc();
+
+        // Iniciar streaming hacia LiveKit Cloud
+        startLiveKit();
     }
 
-    private void ensureAuthAndStartRtc() {
-        if (mAuth.getCurrentUser() != null) {
-            clearRoomAndStartSignaling();
-        } else {
-            mAuth.signInAnonymously().addOnCompleteListener(authTask -> {
-                if (authTask.isSuccessful()) {
-                    Log.d(TAG, "Firebase authenticated anonymously.");
-                    clearRoomAndStartSignaling();
-                } else {
-                    Log.e(TAG, "Firebase auth failed.", authTask.getException());
-                    handleStopAction();
-                }
-            });
+    private void startLiveKit() {
+        if (roomId == null) return;
+        Log.d(TAG, "Conectando a LiveKit Cloud para la sala: " + roomId);
+        if (liveKitManager != null) {
+            liveKitManager.startStream(roomId);
         }
     }
 
-    private void clearRoomAndStartSignaling() {
-        if (roomId == null) return;
-        firestoreSignaling = new FirestoreSignaling(this, roomId, this);
-
-        firestoreSignaling.clearRoom().addOnCompleteListener(clearTask -> {
-            if (!clearTask.isSuccessful()) {
-                Log.w(TAG, "Failed to clear room, attempting to proceed.", clearTask.getException());
-            }
-            Log.d(TAG, "Room state established. Starting WebRTC negotiation.");
-
-            webRtcClient = new WebRtcClient(this, this);
-            firestoreSignaling.listenForAnswer();
-            firestoreSignaling.listenForRemoteIce("callee");
-            webRtcClient.createOffer();
-        });
-    }
 
     private void stopCamera() {
         if (uvcCamera != null) {
@@ -195,113 +179,96 @@ public class CameraStreamService extends Service implements WebRtcClient.Events,
         }
     }
 
-    private void stopRtc() {
-        if (webRtcClient != null) {
-            webRtcClient.close();
-            webRtcClient = null;
-        }
-        if (firestoreSignaling != null) {
-            firestoreSignaling.dispose();
-            firestoreSignaling.clearRoom();
-            firestoreSignaling = null;
+    private void stopLiveKit() {
+        if (liveKitManager != null) {
+            liveKitManager.stopStream();
         }
         roomId = null;
     }
 
-    // CORRECCIÓN: Este método estaba causando errores si no estaba bien declarado
-    private void handleStopAction() {
+    private void handleStopAction(String reason) {
+        Log.d(TAG, "Deteniendo servicio de streaming. Razón: " + reason);
         releaseWakeLock();
-        stopRtc();
+        stopLiveKit();
         stopCamera();
-        stopForeground(true);
-        sendBroadcast(new Intent(ACTION_SERVICE_STOPPED));
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
+
+        Intent stoppedIntent = new Intent(ACTION_SERVICE_STOPPED);
+        stoppedIntent.putExtra(EXTRA_ERROR_MESSAGE, reason);
+        sendBroadcast(stoppedIntent);
         stopSelf();
     }
 
     @Override public void onDestroy() {
-        // CORRECCIÓN: onDestroy debe llamar a handleStopAction si el servicio se destruye
-        handleStopAction();
+        handleStopAction("Servicio destruido");
         if (usbMonitor != null) usbMonitor.destroy();
         super.onDestroy();
     }
 
-    // CORRECCIÓN: Este método estaba causando errores si no estaba bien declarado
     private void acquireWakeLock() {
         if (wakeLock == null) {
             PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "appcasco::TransmissionWakelock");
         }
         if (!wakeLock.isHeld()) {
-            wakeLock.acquire(10*60*1000L /*10 minutes*/);
-            Log.d(TAG, "WakeLock acquired");
+            wakeLock.acquire(); // Mantiene despierto el streaming continuo
+            Log.d(TAG, "WakeLock adquirido");
         }
     }
 
     private void releaseWakeLock() {
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
-            Log.d(TAG, "WakeLock released");
+            Log.d(TAG, "WakeLock liberado");
         }
     }
 
-    // --- Implementación de WebRtcClient.Events ---
+    // --- Implementación de LiveKitStreamManager.Events ---
 
-    @Override public void onLocalSdp(SessionDescription sdp) {
-        if (firestoreSignaling != null) firestoreSignaling.postLocalSdp(sdp);
+    @Override public void onConnected() {
+        Log.d(TAG, "LiveKit: Conectado al servidor SFU");
+        updateNotification("Conectado al servidor LiveKit");
     }
 
-    @Override public void onLocalIce(IceCandidate cand) {
-        if (firestoreSignaling != null) firestoreSignaling.postIce(cand, "caller");
+    @Override public void onStreamingStarted() {
+        Log.d(TAG, "LiveKit: Video en vivo publicándose exitosamente");
+        updateNotification("Transmitiendo video en vivo a LiveKit");
     }
 
-    @Override public void onRemoteSdp(SessionDescription sdp) {
-        if (webRtcClient != null) {
-            webRtcClient.setRemoteDescription(sdp);
-            if (sdp.type == SessionDescription.Type.ANSWER && firestoreSignaling != null) {
-                firestoreSignaling.updateRoomStatus("active");
-            }
-        }
+    @Override public void onDisconnected() {
+        Log.d(TAG, "LiveKit: Desconectado");
     }
 
-    @Override public void onRemoteIce(IceCandidate c) {
-        if (webRtcClient != null) webRtcClient.addRemoteIce(c);
+    @Override public void onError(String message) {
+        Log.e(TAG, "Error LiveKit: " + message);
+        updateNotification("Error LiveKit: " + message);
     }
 
-    @Override public void onIceConnectionStateChange(PeerConnection.IceConnectionState newState) {
-        Log.d(TAG, "ICE connection state changed to: " + newState.name());
-        if (newState == PeerConnection.IceConnectionState.CONNECTED || newState == PeerConnection.IceConnectionState.COMPLETED) {
-            Log.d(TAG, "¡CONEXIÓN EXITOSA!");
-            updateNotification();
-        } else if (newState == PeerConnection.IceConnectionState.FAILED) {
-            Log.e(TAG, "ICE Connection Failed. Attempting restart...");
-        }
-    }
+    // --- Notificaciones ---
 
-    // --- Implementación de FirestoreSignaling.Listener ---
-
-    @Override public void onError(String message, Exception e) {
-        Log.e(TAG, "Signaling error: " + message, e);
-    }
-
-    // --- Funciones de Notificación ---
-
-    // CORRECCIÓN: Este método estaba causando errores si no estaba bien declarado
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID, "Active Camera", NotificationManager.IMPORTANCE_LOW);
+                    NOTIFICATION_CHANNEL_ID, "Transmisión de Cámara", NotificationManager.IMPORTANCE_LOW);
             getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
     }
 
-    private void updateNotification() {
+    private void updateNotification(String text) {
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        manager.notify(NOTIFICATION_ID, createNotification("Streaming connection active."));
+        if (manager != null) {
+            manager.notify(NOTIFICATION_ID, createNotification(text));
+        }
     }
 
     private Notification createNotification(String text) {
         return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-                .setContentTitle("External Camera Active")
+                .setContentTitle("Casco Inteligente Activo")
                 .setContentText(text)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)

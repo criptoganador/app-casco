@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    id("com.google.gms.google-services")
 }
 
 android {
@@ -35,13 +34,9 @@ android {
 }
 
 dependencies {
-    implementation(platform("com.google.firebase:firebase-bom:34.6.0"))
-    implementation("com.google.firebase:firebase-analytics")
-    implementation("com.google.firebase:firebase-auth")
-    implementation("com.google.firebase:firebase-firestore")
 
-    // Librería WebRTC
-    implementation("io.github.webrtc-sdk:android:137.7151.04")
+    // Librería LiveKit Android (incluye WebRTC y soporte SFU)
+    implementation("io.livekit:livekit-android:2.11.1")
 
     implementation(libs.appcompat)
     implementation(libs.material)

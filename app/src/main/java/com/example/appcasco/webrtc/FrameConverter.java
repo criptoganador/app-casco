@@ -9,6 +9,19 @@ import java.nio.ByteBuffer;
  */
 public final class FrameConverter {
 
+    private static final ThreadLocal<byte[]> UV_BUFFER = new ThreadLocal<>();
+    private static final ThreadLocal<byte[]> U_BUFFER = new ThreadLocal<>();
+    private static final ThreadLocal<byte[]> V_BUFFER = new ThreadLocal<>();
+
+    private static byte[] getOrCreateBuffer(ThreadLocal<byte[]> threadLocal, int requiredSize) {
+        byte[] buf = threadLocal.get();
+        if (buf == null || buf.length < requiredSize) {
+            buf = new byte[requiredSize];
+            threadLocal.set(buf);
+        }
+        return buf;
+    }
+
     private FrameConverter() {}
 
     /** Versión con ByteBuffer fuente (pos=0, cap>=frame). Acepta direct o heap. */
@@ -37,19 +50,26 @@ public final class FrameConverter {
         }
         yOut.flip();
 
-        // UV
+        // UV optimizado con copiado en bloque
         uOut.clear();
         vOut.clear();
-        for (int row = 0; row < chromaH; row++) {
-            int rowStart = frameSize + row * width;
-            for (int col = 0; col < chromaW; col++) {
-                int idx = rowStart + (col << 1);
-                byte v = nv21.get(idx);
-                byte u = nv21.get(idx + 1);
-                uOut.put(u);
-                vOut.put(v);
-            }
+        final int chromaSize = chromaW * chromaH;
+        final int uvSize = chromaSize * 2;
+
+        byte[] uvBytes = getOrCreateBuffer(UV_BUFFER, uvSize);
+        byte[] uBytes = getOrCreateBuffer(U_BUFFER, chromaSize);
+        byte[] vBytes = getOrCreateBuffer(V_BUFFER, chromaSize);
+
+        nv21.position(frameSize);
+        nv21.get(uvBytes, 0, uvSize);
+
+        for (int i = 0, j = 0; i < uvSize; i += 2, j++) {
+            vBytes[j] = uvBytes[i];
+            uBytes[j] = uvBytes[i + 1];
         }
+
+        uOut.put(uBytes, 0, chromaSize);
+        vOut.put(vBytes, 0, chromaSize);
         uOut.flip();
         vOut.flip();
 

@@ -16,7 +16,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // JitPack ya no es necesario, esta librería está en Maven Central
+        // JitPack: requerido por LiveKit Android (dependencia transitiva audioswitch)
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
