@@ -64,8 +64,8 @@ public final class FrameConverter {
         nv21.get(uvBytes, 0, uvSize);
 
         for (int i = 0, j = 0; i < uvSize; i += 2, j++) {
-            vBytes[j] = uvBytes[i];
-            uBytes[j] = uvBytes[i + 1];
+            uBytes[j] = uvBytes[i];
+            vBytes[j] = uvBytes[i + 1];
         }
 
         uOut.put(uBytes, 0, chromaSize);
