@@ -3,7 +3,7 @@ services:
     name: cascos-app-pc
     runtime: node
     plan: free
-    buildCommand: npm install -g pnpm && pnpm install && pnpm build
+    buildCommand: npm install -g pnpm && pnpm install --no-frozen-lockfile && pnpm build
     startCommand: pnpm start
     envVars:
       - key: NODE_VERSION
