@@ -104,9 +104,10 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         roomNameInput = findViewById(R.id.room_name_input);
 
         cameraView.setSurfaceTextureListener(this);
-        // Inicialización de permisos
+        // Inicialización de permisos y optimizaciones
         ensureNotificationPermission();
         ensureCameraAndMicPermissions();
+        checkBatteryOptimizations();
 
         transmitButton.setOnClickListener(v -> {
             if (detectedCamera == null) {
@@ -118,7 +119,6 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
                 Toast.makeText(this, "Please enter a room name", Toast.LENGTH_SHORT).show();
                 return;
             }
-            checkBatteryOptimizations();
             startCameraService(detectedCamera, roomName);
         });
 
@@ -272,14 +272,33 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
             try {
                 android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
                 if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                    Log.d(TAG, "Solicitando omitir optimizaciones de batería para ejecución continua en segundo plano...");
-                    @SuppressLint("BatteryLife")
-                    Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                    intent.setData(android.net.Uri.parse("package:" + getPackageName()));
-                    startActivity(intent);
+                    android.content.SharedPreferences prefs = getSharedPreferences("appcasco_prefs", MODE_PRIVATE);
+                    boolean alreadyPrompted = prefs.getBoolean("battery_prompted", false);
+                    if (!alreadyPrompted) {
+                        prefs.edit().putBoolean("battery_prompted", true).apply();
+                        new androidx.appcompat.app.AlertDialog.Builder(this)
+                                .setTitle("Optimización de Batería")
+                                .setMessage("Para garantizar que la transmisión del casco continúe sin cortes si la pantalla se apaga o guardas el celular, se sugiere desactivar el ahorro de energía para esta aplicación.")
+                                .setPositiveButton("Configurar", (dialog, which) -> {
+                                    try {
+                                        @SuppressLint("BatteryLife")
+                                        Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                                        intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                                        startActivity(intent);
+                                    } catch (Exception e) {
+                                        try {
+                                            Intent fallback = new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                                            startActivity(fallback);
+                                        } catch (Exception ignored) {}
+                                    }
+                                })
+                                .setNegativeButton("Continuar", (dialog, which) -> dialog.dismiss())
+                                .setCancelable(true)
+                                .show();
+                    }
                 }
             } catch (Exception e) {
-                Log.w(TAG, "Aviso solicitando exclusión de optimización de batería:", e);
+                Log.w(TAG, "Aviso verificando optimización de batería:", e);
             }
         }
     }

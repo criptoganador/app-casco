@@ -13,6 +13,7 @@ import android.os.Build;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.net.wifi.WifiManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.Surface;
@@ -60,6 +61,7 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
 
     private ByteBuffer i420_y, i420_u, i420_v;
     private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
 
     public class LocalBinder extends Binder {
         public CameraStreamService getService() { return CameraStreamService.this; }
@@ -249,20 +251,56 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     }
 
     private void acquireWakeLock() {
-        if (wakeLock == null) {
-            PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "appcasco::TransmissionWakelock");
+        try {
+            if (wakeLock == null) {
+                PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (powerManager != null) {
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "appcasco::TransmissionWakelock");
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire(); // Mantiene la CPU despierta para streaming continuo
+                Log.d(TAG, "WakeLock adquirido");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error adquiriendo WakeLock:", e);
         }
-        if (!wakeLock.isHeld()) {
-            wakeLock.acquire(); // Mantiene despierto el streaming continuo
-            Log.d(TAG, "WakeLock adquirido");
+
+        try {
+            if (wifiLock == null) {
+                WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wifiManager != null) {
+                    wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "appcasco::TransmissionWifiLock");
+                    wifiLock.setReferenceCounted(false);
+                }
+            }
+            if (wifiLock != null && !wifiLock.isHeld()) {
+                wifiLock.acquire(); // Evita suspensión o limitación de Wi-Fi con pantalla bloqueada
+                Log.d(TAG, "WifiLock adquirido");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error adquiriendo WifiLock:", e);
         }
     }
 
     private void releaseWakeLock() {
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-            Log.d(TAG, "WakeLock liberado");
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                Log.d(TAG, "WakeLock liberado");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error liberando WakeLock:", e);
+        }
+
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                Log.d(TAG, "WifiLock liberado");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error liberando WifiLock:", e);
         }
     }
 
