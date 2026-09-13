@@ -31,6 +31,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 
 import com.example.appcasco.util.CompatUsbUtils;
@@ -98,6 +99,7 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         setContentView(R.layout.activity_main);
 
         transmitButton = findViewById(R.id.transmitir_button);
@@ -106,14 +108,17 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         cameraView = findViewById(R.id.camera_view);
         roomNameInput = findViewById(R.id.room_name_input);
 
-        // Soporte Edge-to-Edge para Android 15 y Android 16
+        // Soporte Edge-to-Edge y compensación de barra de navegación del sistema
         View mainView = findViewById(R.id.main);
         if (mainView != null) {
             ViewCompat.setOnApplyWindowInsetsListener(mainView, (v, insets) -> {
-                Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+                Insets systemBars = insets.getInsets(
+                        WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+                );
                 v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
                 return insets;
             });
+            ViewCompat.requestApplyInsets(mainView);
         }
 
         cameraView.setSurfaceTextureListener(this);
