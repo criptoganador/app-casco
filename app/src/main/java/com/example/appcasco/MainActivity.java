@@ -29,6 +29,9 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.example.appcasco.util.CompatUsbUtils;
 import com.example.appcasco.util.CompatIntent; // Importación necesaria para usar la utilidad
@@ -103,6 +106,16 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         cameraView = findViewById(R.id.camera_view);
         roomNameInput = findViewById(R.id.room_name_input);
 
+        // Soporte Edge-to-Edge para Android 15 y Android 16
+        View mainView = findViewById(R.id.main);
+        if (mainView != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(mainView, (v, insets) -> {
+                Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+                v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
+                return insets;
+            });
+        }
+
         cameraView.setSurfaceTextureListener(this);
         // Inicialización de permisos y optimizaciones
         ensureNotificationPermission();
@@ -133,7 +146,11 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
         IntentFilter usbFilter = new IntentFilter();
         usbFilter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         usbFilter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        registerReceiver(usbDeviceReceiver, usbFilter);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbDeviceReceiver, usbFilter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(usbDeviceReceiver, usbFilter);
+        }
 
         IntentFilter serviceFilter = new IntentFilter(CameraStreamService.ACTION_SERVICE_STOPPED);
         // Manejo seguro del registro de BroadcastReceiver para API 33+

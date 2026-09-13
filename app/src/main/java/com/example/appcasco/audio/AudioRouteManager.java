@@ -513,7 +513,11 @@ public class AudioRouteManager {
             filter.addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
             filter.addAction(Intent.ACTION_HEADSET_PLUG);
 
-            context.registerReceiver(audioBroadcastReceiver, filter);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(audioBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(audioBroadcastReceiver, filter);
+            }
             isReceiverRegistered = true;
             Log.d(TAG, "BroadcastReceiver de audio registrado");
         } catch (Exception e) {
