@@ -137,6 +137,12 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
                 Toast.makeText(this, "Please enter a room name", Toast.LENGTH_SHORT).show();
                 return;
             }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Se requieren permisos de cámara y micrófono para transmitir", Toast.LENGTH_SHORT).show();
+                ensureCameraAndMicPermissions();
+                return;
+            }
             startCameraService(detectedCamera, roomName);
         });
 

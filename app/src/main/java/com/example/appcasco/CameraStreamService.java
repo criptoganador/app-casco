@@ -126,20 +126,24 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
                 handleStopAction("Nombre de sala no especificado");
                 return START_NOT_STICKY;
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                int serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL;
-                startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId), serviceType);
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                int serviceType = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE |
-                                  android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                int serviceType = 0;
+                // Dispositivo USB conectado para la cámara del casco
+                serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE;
+
+                if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
                 }
+                if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                    }
+                }
+                if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                        || androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    serviceType |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+                }
+
                 startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId), serviceType);
             } else {
                 startForeground(NOTIFICATION_ID, createNotification("Transmitiendo en sala: " + roomId));
