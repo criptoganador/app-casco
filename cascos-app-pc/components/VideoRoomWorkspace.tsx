@@ -78,12 +78,14 @@ export function VideoRoomWorkspace() {
         }))
         setRooms(formatted)
 
-        // Extraer nombres de salas activas (cascos conectados o publicando)
-        const activeNames = formatted
-          .filter((r) => r.isLive || r.numPublishers > 0 || r.numParticipants > 0)
-          .map((r) => r.name)
+        // Extraer nombres de salas activas e incluir siempre la sala por defecto ("jhoan")
+        const activeNames = Array.from(
+          new Set([
+            LIVEKIT_CONFIG.defaultRoom,
+            ...formatted.map((r) => r.name),
+          ])
+        ).filter(Boolean)
 
-        // Si no hay ninguna sala detectada en LiveKit pero existe sala por defecto, monitorearla opcionalmente
         // Sincronizar: conecta a nuevas salas, desconecta las que desaparecieron
         syncRoomsRef.current(activeNames)
       } else {

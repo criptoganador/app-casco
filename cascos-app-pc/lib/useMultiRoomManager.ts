@@ -9,7 +9,7 @@ import {
   type TrackPublication,
 } from 'livekit-client'
 import { LIVEKIT_CONFIG } from './livekit-config'
-import { createViewerToken, deleteLiveKitRoom } from './livekit-token'
+import { createViewerToken } from './livekit-token'
 import type { HelmetParticipant, GpsTelemetry, WindowState } from '@/types/monitor'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -186,16 +186,7 @@ export function useMultiRoomManager() {
   const handleParticipantLeft = useCallback(
     (roomName: string, identity: string) => {
       detachRemoteAudio(identity)
-      setParticipants((prev) => {
-        const next = prev.filter((p) => p.identity !== identity)
-        // Si no quedan agentes en esa sala, eliminarla de LiveKit Cloud
-        const remainingInRoom = next.filter((p) => p.roomName === roomName).length
-        if (remainingInRoom === 0 && roomName) {
-          console.log(`[MultiRoom] Todos los agentes salieron de "${roomName}". Eliminando sala...`)
-          deleteLiveKitRoom(roomName)
-        }
-        return next
-      })
+      setParticipants((prev) => prev.filter((p) => p.identity !== identity))
       setWindows((prev) => {
         const next = { ...prev }
         delete next[identity]
