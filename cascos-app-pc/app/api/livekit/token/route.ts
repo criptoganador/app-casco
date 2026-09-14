@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
       sub: 'monitor-admin',
       nbf: now - 5,
       exp: now + 300,
-      video: { roomList: true },
+      video: { roomList: true, roomAdmin: true, roomCreate: true },
     }
     const token = await signJwt(claims, apiSecret)
     return NextResponse.json({ token })

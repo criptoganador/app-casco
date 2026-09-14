@@ -1,389 +1,71 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import {
-  Room,
-  RoomEvent,
-  Track,
-  type RemoteParticipant,
-  type TrackPublication,
-} from 'livekit-client'
+import { useEffect, useRef, useCallback } from 'react'
 import { LIVEKIT_CONFIG } from '@/lib/livekit-config'
-import { createAdminToken, createViewerToken } from '@/lib/livekit-token'
-import type {
-  HelmetParticipant,
-  WindowState,
-  RoomSummary,
-  ViewFilterMode,
-  GpsTelemetry,
-} from '@/types/monitor'
+import { useMultiRoomManager } from '@/lib/useMultiRoomManager'
+import type { RoomSummary, ViewFilterMode, WindowState } from '@/types/monitor'
 import { RoomHeader } from './RoomHeader'
 import { SidebarRooms } from './SidebarRooms'
 import { ParticipantWindow } from './ParticipantWindow'
 import { GlobalAgentsMap } from './GlobalAgentsMap'
-import { Users, Radio, ShieldAlert } from 'lucide-react'
+import { Radio, ShieldAlert } from 'lucide-react'
+import { useState } from 'react'
 
 export function VideoRoomWorkspace() {
-  // Estado de LiveKit Room
-  const [currentRoomName, setCurrentRoomName] = useState<string>(LIVEKIT_CONFIG.defaultRoom)
-  const [room, setRoom] = useState<Room | null>(null)
-  const [isConnected, setIsConnected] = useState(false)
-  const [isConnecting, setIsConnecting] = useState(false)
-  const [connectionError, setConnectionError] = useState<string | null>(null)
+  // ─── Hook central multi-room ────────────────────────────────────────────────
+  const {
+    participants,
+    windows,
+    connectedRoomNames,
+    isAnyConnected,
+    isAudioUnlocked,
+    micEnabled,
+    syncRooms,
+    disconnectAll,
+    toggleMic,
+    changeAudioDevice,
+    unlockAudioManually,
+    getRooms,
+    getRoomByName,
+    bringToFront,
+    updateWindowState,
+  } = useMultiRoomManager()
 
-  // Salas activas detectadas por Twirp API
+  // Estado de UI no gestionado por el hook
   const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [isPollingRooms, setIsPollingRooms] = useState(false)
-
-  // Participantes conectados en la sala actual
-  const [participants, setParticipants] = useState<HelmetParticipant[]>([])
-
-  // Estado de las ventanas (posiciones, dimensiones, flotantes, z-index)
-  const [windows, setWindows] = useState<Record<string, WindowState>>({})
-  const [highestZ, setHighestZ] = useState(10)
-
-  // Modos de visualización y barra lateral
+  const [connectionError, setConnectionError] = useState<string | null>(null)
   const [isAutoArrange, setIsAutoArrange] = useState(true)
   const [filterMode, setFilterMode] = useState<ViewFilterMode>('all')
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
-  // Control de audio
-  const [isAudioUnlocked, setIsAudioUnlocked] = useState(true)
-  const audioElementsRef = useRef<HTMLAudioElement[]>([])
-  const pendingAudioRef = useRef<HTMLAudioElement[]>([])
+  // Ref estable para syncRooms (evita closure stale en setInterval)
+  const syncRoomsRef = useRef(syncRooms)
+  useEffect(() => { syncRoomsRef.current = syncRooms }, [syncRooms])
 
-  // ─────────────────────────────────────────────────────────
-  // GESTIÓN DE PARTICIPANTES Y VENTANAS
-  // ─────────────────────────────────────────────────────────
-  const attachRemoteAudio = useCallback((track: any, participantIdentity: string) => {
-    // Ignorar pistas de otros monitores PC para evitar retroalimentación
-    if (participantIdentity.startsWith('monitor-pc-')) return
-
-    try {
-      const audioEl = track.attach() as HTMLAudioElement
-      audioEl.style.display = 'none'
-      document.body.appendChild(audioEl)
-      audioElementsRef.current.push(audioEl)
-
-      audioEl
-        .play()
-        .then(() => {
-          setIsAudioUnlocked(true)
-        })
-        .catch(() => {
-          console.warn('[Audio] Autoplay bloqueado por el navegador. Requiere interacción.')
-          setIsAudioUnlocked(false)
-          pendingAudioRef.current.push(audioEl)
-        })
-    } catch (err) {
-      console.error('[Audio] Error al reproducir pista de audio remota:', err)
+  // ─── Auto-desbloquear audio en el primer gesto del usuario ─────────────────
+  useEffect(() => {
+    const handleUserGesture = () => {
+      unlockAudioManually()
     }
-  }, [])
+    window.addEventListener('pointerdown', handleUserGesture)
+    window.addEventListener('keydown', handleUserGesture)
+    window.addEventListener('mousemove', handleUserGesture, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', handleUserGesture)
+      window.removeEventListener('keydown', handleUserGesture)
+      window.removeEventListener('mousemove', handleUserGesture)
+    }
+  }, [unlockAudioManually])
 
-  const handleParticipantJoined = useCallback(
-    (rp: RemoteParticipant) => {
-      if (!rp || !rp.identity || rp.identity.startsWith('monitor-pc-')) return
-      const identity = rp.identity
-      const name = identity.replace(/^casco-/, '').replace(/-/g, ' ')
-      const initials =
-        name
-          .split(' ')
-          .slice(0, 2)
-          .map((s) => s[0]?.toUpperCase() || '')
-          .join('') || 'C'
-
-      // Detectar publicaciones activas y auto-suscribirse
-      let videoPub: TrackPublication | undefined
-      let audioPub: TrackPublication | undefined
-
-      rp.trackPublications.forEach((pub) => {
-        if (pub.kind === Track.Kind.Video) {
-          videoPub = pub
-          if (!pub.isSubscribed) {
-            pub.setSubscribed(true)
-          }
-        } else if (pub.kind === Track.Kind.Audio) {
-          audioPub = pub
-          if (!pub.isSubscribed) {
-            pub.setSubscribed(true)
-          }
-          if (pub.track) {
-            attachRemoteAudio(pub.track, identity)
-          }
-        }
-      })
-
-      setParticipants((prev) => {
-        const existing = prev.find((p) => p.identity === identity)
-        if (existing) {
-          return prev.map((p) =>
-            p.identity === identity
-              ? {
-                  ...p,
-                  hasVideoTrack: Boolean(videoPub || p.hasVideoTrack),
-                  hasAudioTrack: Boolean(audioPub || p.hasAudioTrack),
-                  isCameraOff: false,
-                  videoPublication: videoPub || p.videoPublication,
-                  audioPublication: audioPub || p.audioPublication,
-                  participantInstance: rp,
-                }
-              : p
-          )
-        }
-
-        const newParticipant: HelmetParticipant = {
-          id: rp.sid || identity,
-          identity,
-          name,
-          initials,
-          isLocal: false,
-          isSpeaking: false,
-          hasVideoTrack: Boolean(videoPub),
-          hasAudioTrack: Boolean(audioPub),
-          isCameraOff: false,
-          isAudioMuted: false,
-          videoPublication: videoPub,
-          audioPublication: audioPub,
-          routeHistory: [],
-          participantInstance: rp,
-        }
-        return [...prev, newParticipant]
-      })
-
-      // Inicializar estado de ventana de manera inmediata
-      setWindows((prev) => {
-        if (prev[identity]) return prev
-        const count = Object.keys(prev).length
-        return {
-          ...prev,
-          [identity]: {
-            id: identity,
-            x: 40 + (count % 4) * 35,
-            y: 90 + Math.floor(count / 4) * 35,
-            width: 580,
-            height: 380,
-            floating: false,
-            minimized: false,
-            maximized: false,
-            z: count + 1,
-          },
-        }
-      })
-    },
-    [attachRemoteAudio]
-  )
-
-  const handleParticipantLeft = useCallback((identity: string) => {
-    setParticipants((prev) => prev.filter((p) => p.identity !== identity))
-    setWindows((prev) => {
-      const next = { ...prev }
-      delete next[identity]
-      return next
-    })
-  }, [])
-
-  const updateParticipant = useCallback((identity: string, patch: Partial<HelmetParticipant>) => {
-    setParticipants((prev) =>
-      prev.map((p) => (p.identity === identity ? { ...p, ...patch } : p))
-    )
-  }, [])
-
-  const handleGpsReceived = useCallback((identity: string, data: GpsTelemetry) => {
-    setParticipants((prev) =>
-      prev.map((p) => {
-        if (p.identity !== identity) return p
-        const latLng: [number, number] = [data.lat, data.lng]
-        const history = [...p.routeHistory, latLng]
-        if (history.length > 500) history.shift()
-        return {
-          ...p,
-          gps: data,
-          routeHistory: history,
-          lastGpsUpdate: Date.now(),
-        }
-      })
-    )
-  }, [])
-
-  // ─────────────────────────────────────────────────────────
-  // CONEXIÓN A SALA LIVEKIT
-  // ─────────────────────────────────────────────────────────
-  const connectToRoom = useCallback(
-    async (roomToJoin: string) => {
-      const cleanRoom = roomToJoin.trim()
-      if (!cleanRoom) return
-
-      if (room) {
-        try {
-          await room.disconnect()
-        } catch (e) {}
-      }
-
-      audioElementsRef.current.forEach((el) => {
-        try {
-          el.pause()
-          el.remove()
-        } catch (e) {}
-      })
-      audioElementsRef.current = []
-      pendingAudioRef.current = []
-
-      setIsConnecting(true)
-      setIsConnected(false)
-      setConnectionError(null)
-      setCurrentRoomName(cleanRoom)
-
-      try {
-        const token = await createViewerToken(cleanRoom)
-        const lkRoom = new Room({
-          adaptiveStream: true,
-          dynacast: true,
-        })
-
-        // 1. Participante conectado
-        lkRoom.on(RoomEvent.ParticipantConnected, (remoteParticipant: RemoteParticipant) => {
-          if (remoteParticipant.identity.startsWith('monitor-pc-')) return
-          handleParticipantJoined(remoteParticipant)
-        })
-
-        // 2. Participante desconectado
-        lkRoom.on(RoomEvent.ParticipantDisconnected, (remoteParticipant: RemoteParticipant) => {
-          handleParticipantLeft(remoteParticipant.identity)
-        })
-
-        // 3. Pista publicada (auto-suscribirse de inmediato e iniciar video/audio)
-        lkRoom.on(RoomEvent.TrackPublished, (publication, participant) => {
-          if (participant.identity.startsWith('monitor-pc-')) return
-          publication.setSubscribed(true)
-
-          handleParticipantJoined(participant as RemoteParticipant)
-
-          if (publication.kind === Track.Kind.Video) {
-            updateParticipant(participant.identity, {
-              hasVideoTrack: true,
-              isCameraOff: false,
-              videoPublication: publication,
-            })
-          } else if (publication.kind === Track.Kind.Audio) {
-            updateParticipant(participant.identity, {
-              hasAudioTrack: true,
-              isAudioMuted: false,
-              audioPublication: publication,
-            })
-          }
-        })
-
-        // 4. Pista suscrita (Video o Audio) - Iniciar llamada / stream al instante
-        lkRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-          if (participant.identity.startsWith('monitor-pc-')) return
-
-          handleParticipantJoined(participant as RemoteParticipant)
-
-          if (track.kind === Track.Kind.Video || (track.kind as string) === 'video') {
-            updateParticipant(participant.identity, {
-              hasVideoTrack: true,
-              isCameraOff: false,
-              videoPublication: publication,
-            })
-          } else if (track.kind === Track.Kind.Audio || (track.kind as string) === 'audio') {
-            attachRemoteAudio(track, participant.identity)
-            updateParticipant(participant.identity, {
-              hasAudioTrack: true,
-              isAudioMuted: false,
-              audioPublication: publication,
-            })
-          }
-        })
-
-        // 5. Pista desuscrita
-        lkRoom.on(RoomEvent.TrackUnsubscribed, (track, _pub, participant) => {
-          if (track.kind === Track.Kind.Video || (track.kind as string) === 'video') {
-            updateParticipant(participant.identity, {
-              hasVideoTrack: false,
-              isCameraOff: true,
-            })
-          }
-        })
-
-        // 6. Telemetría GPS vía WebRTC DataChannel
-        lkRoom.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
-          if (topic === 'location' || topic === 'gps') {
-            try {
-              const text = new TextDecoder().decode(payload)
-              const data = JSON.parse(text)
-              if (participant && typeof data.lat === 'number' && typeof data.lng === 'number') {
-                handleParticipantJoined(participant as RemoteParticipant)
-                handleGpsReceived(participant.identity, data)
-              }
-            } catch (err) {
-              console.warn('[DataChannel] Error procesando telemetría GPS:', err)
-            }
-          }
-        })
-
-        // 7. Indicadores de oradores activos
-        lkRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-          const speakingIds = new Set(speakers.map((s) => s.identity))
-          setParticipants((prev) =>
-            prev.map((p) => ({
-              ...p,
-              isSpeaking: speakingIds.has(p.identity),
-            }))
-          )
-        })
-
-        // 8. Desconexión de la sala
-        lkRoom.on(RoomEvent.Disconnected, () => {
-          setIsConnected(false)
-          setIsConnecting(false)
-          setParticipants([])
-        })
-
-        // Conectar al servidor LiveKit SFU con autoSubscribe activado
-        await lkRoom.connect(LIVEKIT_CONFIG.wsUrl, token, {
-          autoSubscribe: true,
-        })
-
-        setRoom(lkRoom)
-        setIsConnected(true)
-        setIsConnecting(false)
-
-        // Registrar participantes remotos existentes y suscribir pistas
-        lkRoom.remoteParticipants.forEach((remoteParticipant) => {
-          if (!remoteParticipant.identity.startsWith('monitor-pc-')) {
-            handleParticipantJoined(remoteParticipant)
-            remoteParticipant.trackPublications.forEach((pub) => {
-              if (!pub.isSubscribed) {
-                pub.setSubscribed(true)
-              }
-            })
-          }
-        })
-      } catch (err: any) {
-        console.error('[LiveKit] Error de conexión:', err)
-        setIsConnecting(false)
-        setIsConnected(false)
-        setConnectionError(err.message || 'Error conectando a LiveKit Cloud')
-      }
-    },
-    [room, handleParticipantJoined, handleParticipantLeft, updateParticipant, handleGpsReceived, attachRemoteAudio]
-  )
-
-  // ─────────────────────────────────────────────────────────
-  // CONSULTA DE SALAS ACTIVAS (API REST TWIRP) Y AUTO-CONEXIÓN
-  // ─────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CONSULTA DE SALAS ACTIVAS (API REST Twirp) + SINCRONIZACIÓN MULTI-ROOM
+  // ─────────────────────────────────────────────────────────────────────────────
   const fetchActiveRooms = useCallback(async () => {
     try {
       setIsPollingRooms(true)
-      const token = await createAdminToken()
-      const res = await fetch(`${LIVEKIT_CONFIG.apiUrl}/twirp/livekit.RoomService/ListRooms`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      })
+      setConnectionError(null)
+      const res = await fetch('/api/livekit/rooms')
 
       if (res.ok) {
         const data = await res.json()
@@ -396,85 +78,41 @@ export function VideoRoomWorkspace() {
         }))
         setRooms(formatted)
 
-        // AUTO-CONEXIÓN DINÁMICA:
-        // Si detectamos una sala activa con participantes/cámaras y aún no tenemos participantes:
-        const liveRoomWithAgents = formatted.find(
-          (r) => r.isLive && (r.numPublishers > 0 || r.numParticipants > 0)
-        )
-        if (liveRoomWithAgents) {
-          if (currentRoomName !== liveRoomWithAgents.name && participants.length === 0) {
-            console.log(`[AutoConnect] Agente detectado en sala "${liveRoomWithAgents.name}". Conectando automáticamente...`)
-            connectToRoom(liveRoomWithAgents.name)
-          }
-        }
+        // Extraer nombres de salas activas (cascos conectados o publicando)
+        const activeNames = formatted
+          .filter((r) => r.isLive || r.numPublishers > 0 || r.numParticipants > 0)
+          .map((r) => r.name)
+
+        // Si no hay ninguna sala detectada en LiveKit pero existe sala por defecto, monitorearla opcionalmente
+        // Sincronizar: conecta a nuevas salas, desconecta las que desaparecieron
+        syncRoomsRef.current(activeNames)
+      } else {
+        const errData = await res.json().catch(() => ({}))
+        console.warn('[Rooms] Error listando salas:', res.status, errData)
+        setConnectionError(`Error consultando salas activas (HTTP ${res.status})`)
       }
-    } catch (err) {
-      console.warn('[Twirp] Error consultando lista de salas LiveKit:', err)
+    } catch (err: any) {
+      console.warn('[Rooms] Error consultando lista de salas LiveKit:', err)
+      setConnectionError('Sin conexión al servidor de monitoreo. Reintentando...')
     } finally {
       setIsPollingRooms(false)
     }
-  }, [currentRoomName, participants.length, connectToRoom])
+  }, []) // sin deps: usa ref para syncRooms
 
-  // Iniciar conexión y sondeo
+  // Iniciar polling al montar y desconectar todo al desmontar
   useEffect(() => {
-    connectToRoom(LIVEKIT_CONFIG.defaultRoom)
     fetchActiveRooms()
     const interval = setInterval(fetchActiveRooms, LIVEKIT_CONFIG.pollIntervalMs)
     return () => {
       clearInterval(interval)
-      if (room) {
-        try {
-          room.disconnect()
-        } catch (e) {}
-      }
+      disconnectAll()
     }
-  }, [])
+  }, []) // solo al montar/desmontar
 
-  const unlockAudioManually = useCallback(() => {
-    setIsAudioUnlocked(true)
-    pendingAudioRef.current.forEach((el) => {
-      el.muted = false
-      el.play().catch(() => {})
-    })
-    pendingAudioRef.current = []
-  }, [])
-
-  // Auto-desbloquear audio en cuanto haya el menor gesto en la página
-  useEffect(() => {
-    const handleUserGesture = () => {
-      if (pendingAudioRef.current.length > 0) {
-        unlockAudioManually()
-      }
-    }
-    window.addEventListener('pointerdown', handleUserGesture)
-    window.addEventListener('keydown', handleUserGesture)
-    window.addEventListener('mousemove', handleUserGesture, { once: true })
-    return () => {
-      window.removeEventListener('pointerdown', handleUserGesture)
-      window.removeEventListener('keydown', handleUserGesture)
-      window.removeEventListener('mousemove', handleUserGesture)
-    }
-  }, [unlockAudioManually])
-
-  const updateWindowState = (identity: string, patch: Partial<WindowState>) => {
-    setWindows((prev) => ({
-      ...prev,
-      [identity]: {
-        ...prev[identity],
-        ...patch,
-      },
-    }))
-  }
-
-  const bringToFront = (identity: string) => {
-    const nextZ = highestZ + 1
-    setHighestZ(nextZ)
-    updateWindowState(identity, { z: nextZ })
-  }
-
-  // Soporte Multi-monitor (Popout window)
-  const openPopoutWindow = (identity: string) => {
-    const popoutUrl = `/popout?room=${encodeURIComponent(currentRoomName)}&agent=${encodeURIComponent(identity)}`
+  // ─── Soporte Multi-monitor (Popout) ─────────────────────────────────────────
+  // Cada participante conoce su propia roomName — usarla para el popout
+  const openPopoutWindow = (identity: string, roomName: string) => {
+    const popoutUrl = `/popout?room=${encodeURIComponent(roomName)}&agent=${encodeURIComponent(identity)}`
     const popoutWin = window.open(
       popoutUrl,
       `Monitor_${identity}`,
@@ -487,11 +125,14 @@ export function VideoRoomWorkspace() {
     }
   }
 
+  const isConnected = isAnyConnected
+  const isConnecting = isPollingRooms && !isAnyConnected
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans">
       {/* Panel Lateral de Agentes Conectados */}
       <SidebarRooms
-        currentRoomName={currentRoomName}
+        connectedRoomNames={connectedRoomNames}
         participants={participants}
         isOpen={sidebarOpen}
         isPolling={isPollingRooms}
@@ -504,21 +145,24 @@ export function VideoRoomWorkspace() {
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-slate-50 relative">
         {/* Cabecera Superior */}
         <RoomHeader
-          roomName={currentRoomName}
-          room={room}
+          rooms={getRooms()}
           isConnected={isConnected}
           isConnecting={isConnecting}
           participantsCount={participants.length}
+          connectedRoomsCount={connectedRoomNames.length}
+          isAudioUnlocked={isAudioUnlocked}
+          onToggleMic={toggleMic}
+          onChangeDevice={changeAudioDevice}
+          onUnlockAudio={unlockAudioManually}
+          micEnabled={micEnabled}
           isAutoArrange={isAutoArrange}
           filterMode={filterMode}
-          isAudioUnlocked={isAudioUnlocked}
           onToggleAutoArrange={() => setIsAutoArrange(!isAutoArrange)}
           onChangeFilter={setFilterMode}
-          onDisconnect={() => room?.disconnect()}
-          onUnlockAudio={unlockAudioManually}
+          onDisconnect={disconnectAll}
         />
 
-        {/* Contenedor Horizontal: Área de Trabajo + Mapa Global de Sala */}
+        {/* Contenedor Horizontal: Área de Trabajo + Mapa Global */}
         <div className="flex-1 min-h-0 flex overflow-hidden relative">
           {/* Área de Escritorio de Monitoreo */}
           <main className="flex-1 min-h-0 p-4 overflow-y-auto overflow-x-hidden">
@@ -539,16 +183,20 @@ export function VideoRoomWorkspace() {
                   Esperando conexión de cascos inteligentes...
                 </h2>
                 <p className="text-xs text-slate-400 max-w-sm mb-4 leading-relaxed">
-                  Tan pronto como el casco inicie la transmisión desde la aplicación móvil, su video y
-                  mapa GPS aparecerán aquí automáticamente.
+                  Tan pronto como un casco inicie su transmisión, su video y mapa GPS
+                  aparecerán aquí automáticamente. Cada casco tiene su propia sala LiveKit.
                 </p>
                 <div className="flex items-center gap-2 text-[11px] text-slate-500 font-mono">
                   <span className="size-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span>Escuchando sala: {currentRoomName}</span>
+                  <span>
+                    {connectedRoomNames.length > 0
+                      ? `Conectado a ${connectedRoomNames.length} sala(s): ${connectedRoomNames.join(', ')}`
+                      : 'Escaneando salas activas...'}
+                  </span>
                 </div>
               </div>
             ) : (
-              /* Cuadrícula estilo YouTube — tarjetas de tamaño fijo con scroll */
+              /* Cuadrícula de ventanas de participantes */
               <div
                 className={
                   isAutoArrange
@@ -565,7 +213,7 @@ export function VideoRoomWorkspace() {
                 }
               >
                 {participants.map((participant) => {
-                  const winState = windows[participant.identity] || {
+                  const winState: WindowState = windows[participant.identity] || {
                     id: participant.identity,
                     x: 40,
                     y: 90,
@@ -587,11 +235,11 @@ export function VideoRoomWorkspace() {
                         windowState={winState}
                         filterMode={filterMode}
                         isAutoArrange={isAutoArrange}
-                        room={room}
+                        room={getRoomByName(participant.roomName) ?? null}
                         onUpdateState={(patch) => updateWindowState(participant.identity, patch)}
                         onFocus={() => bringToFront(participant.identity)}
-                        onClose={() => handleParticipantLeft(participant.identity)}
-                        onPopout={() => openPopoutWindow(participant.identity)}
+                        onClose={() => {}}
+                        onPopout={() => openPopoutWindow(participant.identity, participant.roomName || '')}
                       />
                     </div>
                   )
@@ -600,8 +248,11 @@ export function VideoRoomWorkspace() {
             )}
           </main>
 
-          {/* Mapa Global de Todos los Agentes en la Sala */}
-          <GlobalAgentsMap participants={participants} roomName={currentRoomName} />
+          {/* Mapa Global de Todos los Agentes */}
+          <GlobalAgentsMap
+            participants={participants}
+            roomName={connectedRoomNames.join(', ')}
+          />
         </div>
       </div>
     </div>

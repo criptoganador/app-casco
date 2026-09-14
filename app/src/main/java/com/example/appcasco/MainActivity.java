@@ -62,15 +62,19 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
     private final BroadcastReceiver serviceStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (CameraStreamService.ACTION_SERVICE_STOPPED.equals(intent.getAction())) {
+            String action = intent.getAction();
+            if (CameraStreamService.ACTION_SERVICE_STOPPED.equals(action)) {
                 Log.d(TAG, "Service has stopped, updating UI.");
                 isStreaming = false;
                 updateUi(false);
                 String reason = intent.getStringExtra(CameraStreamService.EXTRA_ERROR_MESSAGE);
                 if (TextUtils.isEmpty(reason)) {
-                    reason = "Transmisión detenida.";
+                    reason = "Transmisión finalizada.";
                 }
                 Toast.makeText(context, reason, Toast.LENGTH_LONG).show();
+                if (statusText != null) {
+                    statusText.setText(reason);
+                }
             }
         }
     };
@@ -134,8 +138,8 @@ public class MainActivity extends AppCompatActivity implements TextureView.Surfa
             }
             String roomName = roomNameInput.getText() != null ? roomNameInput.getText().toString().trim() : "";
             if (TextUtils.isEmpty(roomName)) {
-                Toast.makeText(this, "Please enter a room name", Toast.LENGTH_SHORT).show();
-                return;
+                roomName = "jhoan";
+                roomNameInput.setText("jhoan");
             }
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {

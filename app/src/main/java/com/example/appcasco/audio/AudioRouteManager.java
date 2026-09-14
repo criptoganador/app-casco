@@ -420,10 +420,9 @@ public class AudioRouteManager {
         if (audioManager == null) return;
         try {
             int maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL);
-            int curVol = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
-            if (curVol < (int) (maxVol * 0.6)) {
-                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, (int) (maxVol * 0.70), 0);
-            }
+            // Conferencia grupal: siempre forzar al 100% para que todos los participantes sean audibles
+            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0);
+            Log.d(TAG, "🔊 [AudioRoute] Volumen de altavoz forzado al máximo: " + maxVol + "/" + maxVol);
         } catch (Exception ignored) {}
     }
 

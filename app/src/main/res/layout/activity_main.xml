@@ -61,6 +61,7 @@
             android:layout_marginBottom="16dp"
             android:background="@android:drawable/editbox_background_normal"
             android:hint="Nombre del Agente / Sala"
+            android:text="jhoan"
             android:inputType="text"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"

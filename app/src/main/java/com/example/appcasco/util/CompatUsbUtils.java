@@ -19,12 +19,21 @@ public final class CompatUsbUtils {
     return new ArrayList<>(um.getDeviceList().values());
   }
 
-  /** ¿Es cámara UVC? (clase de Video 0x0E a nivel de device o interface) */
+  /** ¿Es cámara UVC? (clase de Video 0x0E a nivel de device o interface, o descriptor MISC/IAD) */
   public static boolean isUvc(UsbDevice d) {
     if (d == null) return false;
     if (d.getDeviceClass() == UsbConstants.USB_CLASS_VIDEO) return true;
     for (int i = 0; i < d.getInterfaceCount(); i++) {
       if (d.getInterface(i).getInterfaceClass() == UsbConstants.USB_CLASS_VIDEO) return true;
+    }
+    // Compatibilidad con descriptores IAD en Android 13/14 (Redmi/HyperOS)
+    if (d.getDeviceClass() == UsbConstants.USB_CLASS_MISC || d.getDeviceClass() == UsbConstants.USB_CLASS_PER_INTERFACE) {
+      if (d.getInterfaceCount() > 0) {
+        int ifClass = d.getInterface(0).getInterfaceClass();
+        if (ifClass != UsbConstants.USB_CLASS_MASS_STORAGE && ifClass != UsbConstants.USB_CLASS_HUB) {
+          return true;
+        }
+      }
     }
     return false;
   }

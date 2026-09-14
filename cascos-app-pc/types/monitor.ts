@@ -27,6 +27,8 @@ export interface HelmetParticipant {
   routeHistory: [number, number][]
   lastGpsUpdate?: number
   participantInstance?: RemoteParticipant | LocalParticipant
+  /** Nombre de la sala LiveKit a la que pertenece este agente (arquitectura multi-room) */
+  roomName?: string
 }
 
 export interface WindowState {

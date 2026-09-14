@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Coincide con dispositivos de clase de Video (UVC) -->
+    <!-- Coincide con dispositivos de clase de Video (UVC) y cámaras compuestas IAD -->
     <usb-interface class="14" /> <!-- 14 decimal = 0x0E = Video -->
+    <usb-interface class="239" /> <!-- 239 decimal = 0xEF = Misc / IAD Video -->
+    <usb-device />
 </resources>

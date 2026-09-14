@@ -23,6 +23,7 @@ import androidx.core.app.NotificationCompat;
 
 import com.example.appcasco.livekit.LiveKitStreamManager;
 import com.example.appcasco.util.CompatIntent;
+import com.example.appcasco.util.CompatUsbUtils;
 import com.example.appcasco.util.LocationTracker;
 import com.example.appcasco.webrtc.FrameConverter;
 import com.serenegiant.usb.IFrameCallback;
@@ -41,8 +42,11 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     public static final String ACTION_START = "com.example.app.ACTION_START";
     public static final String ACTION_STOP  = "com.example.app.ACTION_STOP";
     public static final String ACTION_SERVICE_STOPPED = "com.example.app.ACTION_SERVICE_STOPPED";
+    public static final String ACTION_CAMERA_DISCONNECTED = "com.example.app.ACTION_CAMERA_DISCONNECTED";
+    public static final String ACTION_CAMERA_RECONNECTED = "com.example.app.ACTION_CAMERA_RECONNECTED";
     public static final String EXTRA_ROOM_ID = "com.example.app.EXTRA_ROOM_ID";
     public static final String EXTRA_ERROR_MESSAGE = "com.example.app.EXTRA_ERROR_MESSAGE";
+    public static final String EXTRA_DEVICE_NAME = "com.example.app.EXTRA_DEVICE_NAME";
 
     private static final String TAG = "CameraStreamService";
     private static final String NOTIFICATION_CHANNEL_ID = "CameraServiceChannel";
@@ -62,6 +66,7 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     private ByteBuffer i420_y, i420_u, i420_v;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    private volatile boolean isStopping = false;
 
     public class LocalBinder extends Binder {
         public CameraStreamService getService() { return CameraStreamService.this; }
@@ -80,30 +85,59 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
                     // Desvincular la Surface visual sin detener la captura continua del sensor ni el envío a LiveKit
                     uvcCamera.setPreviewDisplay((Surface) null);
                 }
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 Log.w(TAG, "Aviso ajustando PreviewDisplay de UVC:", e);
             }
         }
     }
 
     private final IFrameCallback frameCallback = frame -> {
-        if (frame == null || liveKitManager == null) return;
-        long timestampNs = System.nanoTime();
-        if (i420_y == null) {
-            i420_y = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT);
-            i420_u = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT / 4);
-            i420_v = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT / 4);
+        if (frame == null || liveKitManager == null || !isPreviewRunning) return;
+        try {
+            long timestampNs = System.nanoTime();
+            if (i420_y == null) {
+                i420_y = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT);
+                i420_u = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT / 4);
+                i420_v = ByteBuffer.allocateDirect(PREVIEW_WIDTH * PREVIEW_HEIGHT / 4);
+            }
+            FrameConverter.nv21ToI420(frame, PREVIEW_WIDTH, PREVIEW_HEIGHT, i420_y, i420_u, i420_v);
+            liveKitManager.pushI420Frame(i420_y, i420_u, i420_v, PREVIEW_WIDTH, PREVIEW_HEIGHT, 0, timestampNs);
+        } catch (Throwable t) {
+            Log.w(TAG, "Aviso procesando fotograma de video:", t);
         }
-        FrameConverter.nv21ToI420(frame, PREVIEW_WIDTH, PREVIEW_HEIGHT, i420_y, i420_u, i420_v);
-        liveKitManager.pushI420Frame(i420_y, i420_u, i420_v, PREVIEW_WIDTH, PREVIEW_HEIGHT, 0, timestampNs);
     };
 
     private final USBMonitor.OnDeviceConnectListener onDeviceConnectListener = new USBMonitor.OnDeviceConnectListener() {
-        @Override public void onAttach(UsbDevice d) {}
-        @Override public void onDettach(UsbDevice d) { handleStopAction("Cámara USB desconectada"); }
-        @Override public void onConnect(UsbDevice d, USBMonitor.UsbControlBlock cb, boolean createNew) { openCamera(cb); }
-        @Override public void onDisconnect(UsbDevice d, USBMonitor.UsbControlBlock cb) { handleStopAction("Conexión USB interrumpida"); }
-        @Override public void onCancel(UsbDevice d) {}
+        @Override
+        public void onAttach(UsbDevice d) {
+            Log.i(TAG, "🔌 Dispositivo USB conectado: " + CompatUsbUtils.describe(d));
+        }
+
+        @Override
+        public void onDettach(UsbDevice d) {
+            Log.w(TAG, "⚠️ Dispositivo USB desconectado físicamente (onDettach): " + CompatUsbUtils.describe(d));
+            stopUvcCameraSafely();
+            handleStopAction("Cámara USB desconectada. Transmisión finalizada.");
+        }
+
+        @Override
+        public void onConnect(UsbDevice d, USBMonitor.UsbControlBlock cb, boolean createNew) {
+            Log.i(TAG, "✅ Dispositivo USB autorizado (onConnect). Abriendo cámara UVC...");
+            openCamera(cb);
+        }
+
+        @Override
+        public void onDisconnect(UsbDevice d, USBMonitor.UsbControlBlock cb) {
+            Log.w(TAG, "⚠️ Conexión USB interrumpida (onDisconnect).");
+            stopUvcCameraSafely();
+            handleStopAction("Conexión USB interrumpida. Transmisión finalizada.");
+        }
+
+        @Override
+        public void onCancel(UsbDevice d) {
+            Log.w(TAG, "Permiso USB cancelado.");
+            handleStopAction("Permiso USB denegado.");
+        }
     };
 
     @Override public void onCreate() {
@@ -119,6 +153,7 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
         final String action = intent.getAction();
 
         if (ACTION_START.equals(action)) {
+            isStopping = false;
             acquireWakeLock();
             this.roomId = intent.getStringExtra(EXTRA_ROOM_ID);
             if (TextUtils.isEmpty(roomId)) {
@@ -172,30 +207,99 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
         return START_STICKY;
     }
 
-    private void openCamera(USBMonitor.UsbControlBlock ctrlBlock) {
-        if (uvcCamera != null) uvcCamera.destroy();
-        uvcCamera = new UVCCamera();
-        try {
-            uvcCamera.open(ctrlBlock);
-            // Intenta modo YUYV predeterminado; si falla, intenta con MJPEG
+    private void stopUvcCameraSafely() {
+        isPreviewRunning = false;
+        if (uvcCamera != null) {
+            UVCCamera cam = uvcCamera;
+            uvcCamera = null;
             try {
-                uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.DEFAULT_PREVIEW_MODE);
-            } catch (Exception eYuyv) {
-                Log.w(TAG, "YUYV no soportado por la cámara, intentando MJPEG...", eYuyv);
-                uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+                cam.setFrameCallback(null, 0);
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso limpiando FrameCallback:", t);
             }
-        } catch (Exception e) {
+            try {
+                cam.setPreviewDisplay((Surface) null);
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso desvinculando PreviewDisplay:", t);
+            }
+            try {
+                cam.stopPreview();
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso en stopPreview:", t);
+            }
+            try {
+                cam.destroy();
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso destruyendo UVCCamera:", t);
+            }
+        }
+        i420_y = null;
+        i420_u = null;
+        i420_v = null;
+        Log.d(TAG, "Pipeline UVC liberado y detenido de forma segura.");
+    }
+
+    private void openCamera(USBMonitor.UsbControlBlock ctrlBlock) {
+        stopUvcCameraSafely();
+
+        UVCCamera camera = new UVCCamera();
+        try {
+            camera.open(ctrlBlock);
+            Log.i(TAG, "Dispositivo UVC abierto con éxito en USBControlBlock");
+        } catch (Throwable e) {
             Log.e(TAG, "Fallo al abrir cámara UVC.", e);
+            try { camera.destroy(); } catch (Throwable ignored) {}
             handleStopAction("Fallo al inicializar cámara UVC: " + e.getMessage());
             return;
         }
 
-        if (previewSurface != null && previewSurface.isValid()) {
-            uvcCamera.setPreviewDisplay(previewSurface);
+        uvcCamera = camera;
+
+        // Intento multinivel de configuración de resolución y formato (MJPEG preferido para compatibilidad MediaTek/Redmi)
+        boolean configured = false;
+        int[] formats = new int[]{ UVCCamera.FRAME_FORMAT_MJPEG, UVCCamera.DEFAULT_PREVIEW_MODE, UVCCamera.FRAME_FORMAT_YUYV };
+        int[][] resolutions = new int[][]{
+                { PREVIEW_WIDTH, PREVIEW_HEIGHT }, // 640x480
+                { 1280, 720 },                      // 720p
+                { 320, 240 }                        // 320x240 fallback
+        };
+
+        for (int format : formats) {
+            for (int[] res : resolutions) {
+                try {
+                    Log.d(TAG, "Intentando configurar tamaño UVC: " + res[0] + "x" + res[1] + " (formato: " + format + ")");
+                    uvcCamera.setPreviewSize(res[0], res[1], format);
+                    configured = true;
+                    Log.i(TAG, "✅ Cámara UVC configurada con éxito: " + res[0] + "x" + res[1] + " (formato: " + format + ")");
+                    break;
+                } catch (Throwable ex) {
+                    Log.w(TAG, "Formato " + format + " / " + res[0] + "x" + res[1] + " no soportado, probando siguiente...", ex);
+                }
+            }
+            if (configured) break;
         }
-        uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
-        uvcCamera.startPreview();
-        isPreviewRunning = true;
+
+        if (!configured) {
+            try {
+                Log.w(TAG, "Probando fallback con PREVIEW_WIDTH/HEIGHT MJPEG...");
+                uvcCamera.setPreviewSize(PREVIEW_WIDTH, PREVIEW_HEIGHT, UVCCamera.FRAME_FORMAT_MJPEG);
+            } catch (Throwable e) {
+                Log.e(TAG, "Aviso: fallo al configurar resolución en la cámara USB:", e);
+            }
+        }
+
+        try {
+            if (previewSurface != null && previewSurface.isValid()) {
+                uvcCamera.setPreviewDisplay(previewSurface);
+            }
+            uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_NV21);
+            uvcCamera.startPreview();
+            isPreviewRunning = true;
+            Log.i(TAG, "▶ uvcCamera.startPreview() iniciado exitosamente. Captura de video activa.");
+        } catch (Throwable e) {
+            Log.e(TAG, "Error iniciando startPreview en cámara UVC:", e);
+            isPreviewRunning = false;
+        }
 
         // Iniciar streaming hacia LiveKit Cloud
         startLiveKit();
@@ -209,14 +313,8 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
         }
     }
 
-
     private void stopCamera() {
-        if (uvcCamera != null) {
-            try { uvcCamera.stopPreview(); } catch (Exception ignored) {}
-            isPreviewRunning = false;
-            try { uvcCamera.destroy(); } catch (Exception ignored) {}
-            uvcCamera = null;
-        }
+        stopUvcCameraSafely();
     }
 
     private void stopLiveKit() {
@@ -227,6 +325,8 @@ public class CameraStreamService extends Service implements LiveKitStreamManager
     }
 
     private void handleStopAction(String reason) {
+        if (isStopping) return;
+        isStopping = true;
         Log.d(TAG, "Deteniendo servicio de streaming. Razón: " + reason);
         releaseWakeLock();
         if (locationTracker != null) {

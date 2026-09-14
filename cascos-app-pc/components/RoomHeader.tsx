@@ -5,11 +5,12 @@ import type { Room } from 'livekit-client'
 import { AudioControls } from './AudioControls'
 
 interface RoomHeaderProps {
-  roomName?: string
-  room?: Room | null
+  /** Lista de salas LiveKit activas (multi-room) */
+  rooms?: Room[]
   isConnected: boolean
   isConnecting: boolean
   participantsCount: number
+  connectedRoomsCount?: number
   isAudioUnlocked: boolean
   isAutoArrange?: boolean
   filterMode?: any
@@ -17,15 +18,22 @@ interface RoomHeaderProps {
   onChangeFilter?: any
   onDisconnect?: () => void
   onUnlockAudio: () => void
+  onToggleMic: (deviceId?: string) => Promise<boolean>
+  onChangeDevice: (deviceId: string) => Promise<void>
+  micEnabled: boolean
 }
 
 export function RoomHeader({
-  room,
+  rooms = [],
   isConnected,
   isConnecting,
   participantsCount,
+  connectedRoomsCount = 0,
   isAudioUnlocked,
   onUnlockAudio,
+  onToggleMic,
+  onChangeDevice,
+  micEnabled,
 }: RoomHeaderProps) {
   return (
     <header className="h-14 px-5 bg-white border-b border-slate-200 flex items-center justify-between gap-4 z-20 shrink-0 shadow-sm">
@@ -54,7 +62,9 @@ export function RoomHeader({
           <span className="text-xs text-slate-500">
             {isConnected
               ? participantsCount > 0
-                ? `${participantsCount} casco(s) en vivo`
+                ? `${participantsCount} casco(s) · ${connectedRoomsCount} sala(s)`
+                : connectedRoomsCount > 0
+                ? `${connectedRoomsCount} sala(s) activa(s)`
                 : 'En línea'
               : isConnecting
               ? 'Conectando...'
@@ -63,11 +73,14 @@ export function RoomHeader({
         </div>
       </div>
 
-      {/* Controles de audio */}
+      {/* Controles de audio multi-room */}
       <AudioControls
-        room={room ?? null}
+        rooms={rooms}
         isAudioUnlocked={isAudioUnlocked}
         onUnlockAudio={onUnlockAudio}
+        onToggleMic={onToggleMic}
+        onChangeDevice={onChangeDevice}
+        micEnabled={micEnabled}
       />
     </header>
   )

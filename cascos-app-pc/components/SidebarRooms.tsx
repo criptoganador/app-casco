@@ -23,6 +23,7 @@ import {
   GripVertical,
 } from 'lucide-react'
 import type { HelmetParticipant } from '@/types/monitor'
+import { Radio as RadioIcon } from 'lucide-react'
 
 // ─── Tipos para Drag & Resize ────────────────────────────────────────────────
 type ResizeMode = 'move' | 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
@@ -156,7 +157,8 @@ function ResizeHandle({
 
 // ─── Props del Componente ─────────────────────────────────────────────────────
 interface SidebarRoomsProps {
-  currentRoomName: string
+  /** Nombres de salas LiveKit activas (arquitectura multi-room) */
+  connectedRoomNames?: string[]
   participants: HelmetParticipant[]
   isOpen: boolean
   isPolling: boolean
@@ -167,7 +169,7 @@ interface SidebarRoomsProps {
 }
 
 export function SidebarRooms({
-  currentRoomName,
+  connectedRoomNames = [],
   participants,
   isOpen,
   isPolling,
@@ -196,7 +198,8 @@ export function SidebarRooms({
 
   // Abrir en ventana independiente (para otro monitor o pantalla)
   const openExternalPopout = () => {
-    const popoutUrl = `/popout?view=agents-list&room=${encodeURIComponent(currentRoomName)}`
+    const roomsParam = connectedRoomNames.join(',')
+    const popoutUrl = `/popout?view=agents-list&rooms=${encodeURIComponent(roomsParam)}`
     const popoutWin = window.open(
       popoutUrl,
       'AgentsList_ExternalWindow',
@@ -302,6 +305,13 @@ export function SidebarRooms({
                         <p className="text-[10px] text-slate-400 truncate font-mono">
                           {p.identity}
                         </p>
+                        {/* Badge de sala: identifica a qué sala pertenece este agente */}
+                        {p.roomName && (
+                          <span className="inline-flex items-center gap-1 mt-0.5 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-violet-500/15 text-violet-400 border border-violet-500/25">
+                            <RadioIcon className="size-2.5" />
+                            {p.roomName}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -371,11 +381,17 @@ export function SidebarRooms({
         )}
       </div>
 
-      {/* Pie del Panel */}
+      {/* Pie del Panel — muestra cuántas salas están activas en modo multi-room */}
       <div className="p-3 border-t border-slate-200 text-[11px] text-slate-500 flex items-center justify-between bg-slate-50 shrink-0 select-none">
-        <span>Sala activa:</span>
-        <span className="font-mono text-slate-700 font-semibold truncate max-w-[140px]">
-          {currentRoomName || 'jhoan'}
+        <span>Salas activas:</span>
+        <span className={`font-mono font-semibold truncate max-w-[160px] ${
+          connectedRoomNames.length > 0 ? 'text-emerald-600' : 'text-slate-400'
+        }`}>
+          {connectedRoomNames.length > 0
+            ? connectedRoomNames.length === 1
+              ? connectedRoomNames[0]
+              : `${connectedRoomNames.length} salas`
+            : 'Ninguna'}
         </span>
       </div>
     </>

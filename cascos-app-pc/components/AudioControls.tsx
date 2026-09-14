@@ -2,17 +2,33 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Mic, MicOff, Volume2, VolumeX, Headphones, AlertCircle } from 'lucide-react'
+import { Track } from 'livekit-client'
 import type { Room } from 'livekit-client'
 import type { AudioInputDeviceInfo } from '@/types/monitor'
 
 interface AudioControlsProps {
-  room: Room | null
+  /** Lista de todas las salas LiveKit activas (arquitectura multi-room) */
+  rooms: Room[]
   isAudioUnlocked: boolean
   onUnlockAudio: () => void
+  /** Callback del hook multi-room para activar/desactivar mic en TODAS las salas */
+  onToggleMic: (deviceId?: string) => Promise<boolean>
+  /** Callback del hook multi-room para cambiar dispositivo de audio en TODAS las salas */
+  onChangeDevice: (deviceId: string) => Promise<void>
+  /** Estado actual del mic (controlado por el hook) */
+  micEnabled: boolean
 }
 
-export function AudioControls({ room, isAudioUnlocked, onUnlockAudio }: AudioControlsProps) {
-  const [micEnabled, setMicEnabled] = useState(false)
+export function AudioControls({
+  rooms,
+  isAudioUnlocked,
+  onUnlockAudio,
+  onToggleMic,
+  onChangeDevice,
+  micEnabled: micEnabledProp,
+}: AudioControlsProps) {
+  // micEnabled es controlado externamente por el hook multi-room
+  const micEnabled = micEnabledProp
   const [isMutedAll, setIsMutedAll] = useState(false)
   const [devices, setDevices] = useState<AudioInputDeviceInfo[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string>('')
@@ -120,63 +136,49 @@ export function AudioControls({ room, isAudioUnlocked, onUnlockAudio }: AudioCon
     })
   }
 
-  // Activar o desactivar micrófono local (PC → Celular)
+  // Activar o desactivar micrófono en TODAS las salas activas (multi-room)
   const toggleMic = async () => {
-    if (!room) {
-      alert('Conéctate a una sala para transmitir tu voz al casco.')
+    if (rooms.length === 0) {
+      alert('No hay salas de cascos activas. Espera a que un casco inicie su transmisión.')
       return
     }
 
     setIsRequestingMic(true)
-
     try {
-      const nextState = !micEnabled
+      const nextEnabled = await onToggleMic(selectedDevice || undefined)
+      console.log(`[Audio] ${nextEnabled ? '✅ Micrófono ACTIVADO' : '🔇 Micrófono SILENCIADO'} en ${rooms.length} sala(s).`)
 
-      if (nextState) {
-        // Publicar micrófono en LiveKit con supresión de eco y ruido
-        const pub = await room.localParticipant.setMicrophoneEnabled(true, {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
-        })
-
-        setMicEnabled(true)
-        console.log('[Audio] Micrófono de PC activado:', pub)
-
-        // Obtener MediaStreamTrack para el vúmetro
-        const micTrack = (room.localParticipant.getTrackPublication as any)('microphone')?.track
-        if (micTrack && (micTrack as any).mediaStreamTrack) {
-          startMicMeter((micTrack as any).mediaStreamTrack)
-        }
-
+      if (nextEnabled) {
         await loadDevices()
+        // Iniciar vúmetro usando la primera sala disponible
+        const firstRoom = rooms[0]
+        if (firstRoom?.localParticipant) {
+          const micPub = firstRoom.localParticipant.getTrackPublication(Track.Source.Microphone)
+          const micTrackLk = micPub?.track
+          if (micTrackLk && (micTrackLk as any).mediaStreamTrack) {
+            startMicMeter((micTrackLk as any).mediaStreamTrack)
+          }
+        }
       } else {
         stopMicMeter()
-        await room.localParticipant.setMicrophoneEnabled(false)
-        setMicEnabled(false)
-        console.log('[Audio] Micrófono de PC silenciado')
       }
     } catch (err: any) {
       stopMicMeter()
-      setMicEnabled(false)
-      console.error('[Audio] Error con micrófono:', err)
+      console.error('[Audio] ❌ Error con micrófono:', err)
       alert('Error activando el micrófono: ' + (err.message || err))
     } finally {
       setIsRequestingMic(false)
     }
   }
 
-  // Cambiar dispositivo de entrada de micrófono
+  // Cambiar dispositivo de micrófono en TODAS las salas activas
   const handleDeviceChange = async (newDeviceId: string) => {
     setSelectedDevice(newDeviceId)
-    if (room && micEnabled) {
-      try {
-        await room.switchActiveDevice('audioinput', newDeviceId)
-        console.log('[Audio] Dispositivo cambiado a:', newDeviceId)
-      } catch (e) {
-        console.warn('[Audio] Error cambiando dispositivo:', e)
-      }
+    try {
+      await onChangeDevice(newDeviceId)
+      console.log('[Audio] Dispositivo cambiado en todas las salas a:', newDeviceId)
+    } catch (e) {
+      console.warn('[Audio] Error cambiando dispositivo:', e)
     }
   }
 

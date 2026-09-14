@@ -67,9 +67,9 @@ public class LiveKitStreamManager {
 
     private static final String TAG = "LiveKitStreamMgr";
 
-    public static final String LIVEKIT_URL = "wss://asicme-casco-xlxbe39o.livekit.cloud";
-    public static final String LIVEKIT_API_KEY = "APIutSnBDwPrHSM";
-    public static final String LIVEKIT_API_SECRET = "DYIeeEd4f2ljsCgOQN2wb7ypHErawhAmeEBm0gVq5TmD";
+    public static final String LIVEKIT_URL = "wss://casco-nmlttzpb.livekit.cloud";
+    public static final String LIVEKIT_API_KEY = "APIpjmsEDHpxCN8";
+    public static final String LIVEKIT_API_SECRET = "fiDVGQeuyDwhlT3HZWHIHEO849OsweeTV4hwEBUemePJ";
 
     public interface Events {
         void onConnected();
@@ -86,6 +86,7 @@ public class LiveKitStreamManager {
     private UvcVideoCapturer uvcCapturer;
     private LocalVideoTrack localVideoTrack;
     private volatile boolean isConnected = false;
+    private volatile boolean isPublishing = false; // Evita publicar dos veces en paralelo
     private Job roomEventsJob = null; // Job para cancelar la colección de eventos al detener
     private final AudioRouteManager audioRouteManager;
     private final NetworkConnectionManager networkManager;
@@ -169,19 +170,27 @@ public class LiveKitStreamManager {
             @Override
             public void run() {
                 try {
-                    Log.d(TAG, "Iniciando LiveKit para sala: " + roomName);
-                    String identity = "casco-" + Build.MODEL.replaceAll("\\s+", "-");
+                    String cleanRoomName = (roomName != null && !roomName.trim().isEmpty())
+                            ? roomName.trim().replaceAll("[^a-zA-Z0-9_-]", "_")
+                            : "jhoan";
+                    String cleanModel = (Build.MODEL != null && !Build.MODEL.trim().isEmpty())
+                            ? Build.MODEL.trim().replaceAll("[^a-zA-Z0-9_-]", "-")
+                            : "android";
+                    String identity = "casco-" + cleanModel;
+                    Log.d(TAG, "Iniciando LiveKit para sala: " + cleanRoomName + " con identidad: " + identity);
                     String token = LiveKitTokenGenerator.createPublisherToken(
                             LIVEKIT_API_KEY,
                             LIVEKIT_API_SECRET,
-                            roomName,
+                            cleanRoomName,
                             identity
                     );
 
-                    stopStream();
+                    // Libera la sesión anterior SIN alterar currentRoomName ni isExplicitlyStopped
+                    // Esto evita el crash "MediaStreamTrack has been disposed" por desechar el capturer
+                    // mientras una coroutine de conexión aún lo estaba referenciando.
+                    teardownCurrentSession();
 
                     // Configuración de audio con cancelación de eco (AEC) y supresión de ruido (NS) activadas.
-                    // Esto evita que el micrófono del celular capture la voz que sale por su propio altavoz y la reenvíe a la PC.
                     LocalAudioTrackOptions audioCaptureDefaults = new LocalAudioTrackOptions(
                             true,  // noiseSuppression
                             true,  // echoCancellation (AEC)
@@ -193,7 +202,7 @@ public class LiveKitStreamManager {
                             false,
                             null,
                             null,
-                            new VideoCaptureParameter(1280, 720, 30, true)
+                            new VideoCaptureParameter(640, 480, 30, true)
                     );
                     RoomOptions roomOptions = new RoomOptions(
                             true,   // adaptiveStream activado para optimizar consumo y latencia
@@ -206,8 +215,11 @@ public class LiveKitStreamManager {
                             new LocalVideoTrackOptions(),
                             new VideoTrackPublishDefaults()
                     );
+
+                    // Crear nuevos objetos DESPUÉS de limpiar la sesión anterior
                     room = LiveKit.INSTANCE.create(context, roomOptions, new LiveKitOverrides());
                     uvcCapturer = new UvcVideoCapturer();
+                    isPublishing = false;
 
                     // Conectar a LiveKit Cloud
                     room.connect(LIVEKIT_URL, token, new ConnectOptions(), new Continuation<Unit>() {
@@ -226,14 +238,15 @@ public class LiveKitStreamManager {
                             } else {
                                 Log.d(TAG, "¡Conectado exitosamente a LiveKit Cloud!");
                                 isConnected = true;
-                                // Iniciar gestión profesional de audio y detección de desconexiones
+                                // Iniciar gestión profesional de audio (enrutamiento + AEC + foco)
                                 audioRouteManager.startCallAudio();
-                                configureAudioOutput();
                                 // Suscribirse a eventos de la sala para recibir audio remoto de la PC
                                 startRoomEventsCollection();
                                 if (events != null) events.onConnected();
                                 // Reproducir cualquier track remoto que ya esté publicado
                                 subscribeToExistingRemoteTracks();
+                                // Forzar volumen al máximo DESPUÉS de que AudioRouteManager configure el modo
+                                forceMaxCallVolume();
                                 publishTrack();
                             }
                         }
@@ -247,21 +260,68 @@ public class LiveKitStreamManager {
         });
     }
 
+    /**
+     * Libera la sesión LiveKit actual (track, capturer, room) sin modificar las banderas
+     * de estado que controlan la lógica de reconexión automática.
+     * Llamar siempre desde el hilo del executor antes de crear una nueva sesión.
+     */
+    private void teardownCurrentSession() {
+        isConnected = false;
+        isPublishing = false;
+        if (roomEventsJob != null) {
+            roomEventsJob.cancel(null);
+            roomEventsJob = null;
+        }
+        try {
+            if (localVideoTrack != null) {
+                localVideoTrack.stop();
+                localVideoTrack.dispose();
+                localVideoTrack = null;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Aviso liberando localVideoTrack:", e);
+        }
+        try {
+            if (uvcCapturer != null) {
+                uvcCapturer.dispose();
+                uvcCapturer = null;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Aviso liberando uvcCapturer:", e);
+        }
+        try {
+            if (room != null) {
+                room.disconnect();
+                room = null;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Aviso desconectando room:", e);
+        }
+    }
+
     private void publishTrack() {
         if (room == null || uvcCapturer == null) return;
+        if (isPublishing) {
+            Log.w(TAG, "publishTrack() ignorado: ya se está publicando.");
+            return;
+        }
+        isPublishing = true;
         final LocalParticipant localParticipant = room.getLocalParticipant();
-        if (localParticipant == null) return;
+        if (localParticipant == null) {
+            isPublishing = false;
+            return;
+        }
 
         try {
             LocalVideoTrackOptions videoTrackOptions = new LocalVideoTrackOptions(
                     false,
                     null,
                     null,
-                    new VideoCaptureParameter(1280, 720, 30, true)
+                    new VideoCaptureParameter(640, 480, 30, true)
             );
             localVideoTrack = localParticipant.createVideoTrack("camera", uvcCapturer, videoTrackOptions, null);
             localVideoTrack.startCapture();
-            Log.d(TAG, "LocalVideoTrack creado e inicializado con startCapture()");
+            Log.d(TAG, "LocalVideoTrack (UVC) creado e inicializado con startCapture()");
 
             // Opciones de publicación profesionales:
             // - Simulcast multicapa activado (alta, media, baja) para evitar cuellos de botella
@@ -285,7 +345,7 @@ public class LiveKitStreamManager {
                     new LocalParticipant.PublishListener() {
                         @Override
                         public void onPublishSuccess(TrackPublication publication) {
-                            Log.d(TAG, "¡Track de video publicado en LiveKit exitosamente!");
+                            Log.d(TAG, "¡Track de video UVC publicado en LiveKit exitosamente!");
                             if (events != null) events.onStreamingStarted();
                         }
 
@@ -338,6 +398,120 @@ public class LiveKitStreamManager {
     }
 
     /**
+     * Pausa y despublica la pista de video de la cámara USB externa cuando el cable OTG se desconecta.
+     * Mantiene activa la sesión LiveKit, el audio bidireccional y el GPS sin usar la cámara del teléfono.
+     */
+    public void pauseUvcVideo() {
+        executor.execute(() -> {
+            if (room == null || !isConnected) return;
+            Log.i(TAG, "⏸️ [PAUSA UVC] Despublicando pista de video de cámara USB (cable desconectado)...");
+            final LocalParticipant localParticipant = room.getLocalParticipant();
+            if (localParticipant == null) return;
+
+            try {
+                if (localVideoTrack != null) {
+                    localParticipant.unpublishTrack(localVideoTrack, true);
+                    localVideoTrack.stopCapture();
+                    localVideoTrack.dispose();
+                    localVideoTrack = null;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso liberando localVideoTrack en pausa:", t);
+            }
+
+            try {
+                if (uvcCapturer != null) {
+                    uvcCapturer.dispose();
+                    uvcCapturer = null;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso liberando uvcCapturer en pausa:", t);
+            }
+        });
+    }
+
+    /**
+     * Reanuda la captura y publicación de la cámara USB externa cuando se vuelve a conectar el cable OTG.
+     */
+    public void resumeUvcVideo() {
+        executor.execute(() -> {
+            if (room == null || !isConnected) return;
+            Log.i(TAG, "▶️ [HOT-PLUG] Reanudando transmisión de video desde la cámara USB externa...");
+            final LocalParticipant localParticipant = room.getLocalParticipant();
+            if (localParticipant == null) return;
+
+            try {
+                if (localVideoTrack != null) {
+                    localParticipant.unpublishTrack(localVideoTrack, true);
+                    localVideoTrack.stopCapture();
+                    localVideoTrack.dispose();
+                    localVideoTrack = null;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Aviso liberando track previo antes de reanudar:", t);
+            }
+
+            if (uvcCapturer == null) {
+                uvcCapturer = new UvcVideoCapturer();
+            }
+
+            try {
+                LocalVideoTrackOptions videoTrackOptions = new LocalVideoTrackOptions(
+                        false,
+                        null,
+                        null,
+                        new VideoCaptureParameter(640, 480, 30, true)
+                );
+                localVideoTrack = localParticipant.createVideoTrack("camera", uvcCapturer, videoTrackOptions, null);
+                localVideoTrack.startCapture();
+                Log.i(TAG, "✅ LocalVideoTrack UVC recreado e iniciado con startCapture()");
+
+                VideoTrackPublishOptions pubOptions = new VideoTrackPublishOptions(
+                        "camera",
+                        new VideoEncoding(1_500_000, 30),
+                        true,
+                        "VP8",
+                        null,
+                        null,
+                        Track.Source.CAMERA,
+                        null,
+                        RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                );
+
+                localParticipant.publishVideoTrack(
+                        localVideoTrack,
+                        pubOptions,
+                        new LocalParticipant.PublishListener() {
+                            @Override
+                            public void onPublishSuccess(TrackPublication publication) {
+                                Log.i(TAG, "¡Track de video UVC restaurado en LiveKit exitosamente!");
+                                if (events != null) events.onStreamingStarted();
+                            }
+
+                            @Override
+                            public void onPublishFailure(Exception ex) {
+                                Log.e(TAG, "Error publicando videoTrack UVC tras reconexión", ex);
+                            }
+                        },
+                        new Continuation<Unit>() {
+                            @NonNull
+                            @Override
+                            public CoroutineContext getContext() {
+                                return EmptyCoroutineContext.INSTANCE;
+                            }
+
+                            @Override
+                            public void resumeWith(@NonNull Object result) {
+                            }
+                        }
+                );
+            } catch (Throwable e) {
+                Log.e(TAG, "Error reanudando video UVC:", e);
+            }
+        });
+    }
+
+    /**
      * Suscribe a los eventos del Room usando el Flow de eventos de LiveKit SDK 2.x.
      * Detecta dinámicamente cuando la PC publica su micrófono para reproducirlo de inmediato en el casco.
      */
@@ -377,7 +551,8 @@ public class LiveKitStreamManager {
     }
 
     /**
-     * Procesa eventos de la sala de LiveKit para suscripción y reproducción de audio.
+     * Procesa eventos de la sala de LiveKit para suscripción y reproducción de audio en modo conferencia grupal.
+     * Permite que todos los cascos y el operador de PC se escuchen entre sí simultáneamente.
      */
     private void handleRoomEvent(RoomEvent event) {
         if (event instanceof RoomEvent.TrackSubscribed) {
@@ -385,17 +560,62 @@ public class LiveKitStreamManager {
             if (e.getTrack() instanceof RemoteAudioTrack) {
                 final RemoteAudioTrack audioTrack = (RemoteAudioTrack) e.getTrack();
                 final RemoteParticipant participant = e.getParticipant();
-                final String name = (participant != null && participant.getName() != null)
-                        ? participant.getName() : "PC / Remoto";
+                final String name = (participant != null && participant.getName() != null && !participant.getName().isEmpty())
+                        ? participant.getName() : "Remoto";
                 new Handler(Looper.getMainLooper()).post(() -> {
                     try {
+                        // Siempre llamar start() — LiveKit SDK es idempotente para tracks ya activos
                         audioTrack.start();
-                        Log.d(TAG, "▶ [AUDIO REMOTO RECIBIDO] Reproduciendo voz de: " + name);
+                        // Garantizar volumen al máximo cada vez que llega audio nuevo
+                        forceMaxCallVolume();
+                        Log.d(TAG, "▶ [AUDIO CONFERENCIA RECIBIDO] Reproduciendo voz de: " + name);
                     } catch (Exception ex) {
-                        Log.w(TAG, "Aviso al iniciar audio remoto:", ex);
+                        Log.w(TAG, "Aviso al iniciar audio de conferencia:", ex);
                     }
                 });
             }
+        } else if (event instanceof RoomEvent.TrackPublished) {
+            // Cuando un nuevo participante o la PC publica su micrófono, forzar auto-suscripción inmediata
+            RoomEvent.TrackPublished e = (RoomEvent.TrackPublished) event;
+            if (e.getPublication() instanceof RemoteTrackPublication) {
+                final RemoteTrackPublication pub = (RemoteTrackPublication) e.getPublication();
+                pub.setSubscribed(true);
+                Log.d(TAG, "🎧 [AUTO-SUSCRIPCIÓN] Suscrito a publicación: " + pub.getSid());
+                // Si el track ya existe (publicado antes de suscribirse), iniciarlo de inmediato
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    try {
+                        if (pub.getTrack() instanceof RemoteAudioTrack) {
+                            ((RemoteAudioTrack) pub.getTrack()).start();
+                            forceMaxCallVolume();
+                            Log.d(TAG, "▶ [AUDIO] Track ya disponible al suscribirse, iniciado.");
+                        }
+                    } catch (Exception ex) {
+                        Log.w(TAG, "Aviso iniciando track en TrackPublished:", ex);
+                    }
+                });
+            }
+        } else if (event instanceof RoomEvent.ParticipantConnected) {
+            // Cuando un nuevo casco o PC se une a la llamada, suscribirse a todo su audio
+            RoomEvent.ParticipantConnected e = (RoomEvent.ParticipantConnected) event;
+            final RemoteParticipant participant = e.getParticipant();
+            final String name = (participant != null && participant.getName() != null && !participant.getName().isEmpty())
+                    ? participant.getName() : "Participante";
+            Log.i(TAG, "👤 [CONFERENCIA] Nuevo participante unido a la sala: " + name);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    for (TrackPublication pub : participant.getTrackPublications().values()) {
+                        if (pub instanceof RemoteTrackPublication) {
+                            ((RemoteTrackPublication) pub).setSubscribed(true);
+                        }
+                        if (pub.getTrack() instanceof RemoteAudioTrack) {
+                            ((RemoteAudioTrack) pub.getTrack()).start();
+                            Log.d(TAG, "▶ [AUDIO CONFERENCIA] Enlazado audio de: " + name);
+                        }
+                    }
+                } catch (Exception ex) {
+                    Log.w(TAG, "Aviso suscribiendo participante en conferencia:", ex);
+                }
+            });
         } else if (event instanceof RoomEvent.TrackUnsubscribed) {
             RoomEvent.TrackUnsubscribed e = (RoomEvent.TrackUnsubscribed) event;
             if (e.getTrack() instanceof RemoteAudioTrack) {
@@ -406,7 +626,7 @@ public class LiveKitStreamManager {
                     } catch (Exception ex) {
                         /* ignorar */
                     }
-                    Log.d(TAG, "⏹ [AUDIO REMOTO DETENIDO]");
+                    Log.d(TAG, "⏹ [AUDIO CONFERENCIA DETENIDO]");
                 });
             }
         } else if (event instanceof RoomEvent.Reconnecting) {
@@ -424,23 +644,27 @@ public class LiveKitStreamManager {
     }
 
     /**
-     * Verifica si ya hay participantes remotos con audio publicado al conectarse
-     * (caso: la PC ya tenía el micrófono activo antes de que el casco se conecte).
+     * Verifica y conecta de inmediato todos los participantes remotos con audio existente al unirse a la sala.
+     * Garantiza que si el operador de PC u otros cascos ya estaban hablando, se escuchen inmediatamente.
      */
     private void subscribeToExistingRemoteTracks() {
         if (room == null) return;
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 for (RemoteParticipant participant : room.getRemoteParticipants().values()) {
+                    String name = (participant.getName() != null && !participant.getName().isEmpty())
+                            ? participant.getName() : "Participante";
                     for (TrackPublication pub : participant.getTrackPublications().values()) {
+                        if (pub instanceof RemoteTrackPublication) {
+                            ((RemoteTrackPublication) pub).setSubscribed(true);
+                        }
                         Track track = pub.getTrack();
                         if (track instanceof RemoteAudioTrack) {
                             try {
                                 ((RemoteAudioTrack) track).start();
-                                String name = participant.getName() != null ? participant.getName() : "PC / Remoto";
-                                Log.d(TAG, "▶ [AUDIO REMOTO PREVIO] Reproduciendo voz de: " + name);
+                                Log.d(TAG, "▶ [AUDIO CONFERENCIA ACTIVO] Reproduciendo voz de: " + name);
                             } catch (Exception e) {
-                                Log.w(TAG, "Aviso reproduciendo audio remoto previo:", e);
+                                Log.w(TAG, "Aviso reproduciendo audio de: " + name, e);
                             }
                         }
                     }
@@ -455,7 +679,9 @@ public class LiveKitStreamManager {
      * Inyecta un fotograma I420 proveniente de la cámara UVC.
      */
     public void pushI420Frame(ByteBuffer y, ByteBuffer u, ByteBuffer v, int width, int height, int rotation, long timestampNs) {
-        if (!isConnected || uvcCapturer == null) return;
+        // Guardas de seguridad: no procesar frames si no está conectado, no está publicando
+        // o si el capturer ya fue liberado durante la desconexión física del cable
+        if (!isConnected || !isPublishing || uvcCapturer == null || localVideoTrack == null) return;
 
         try {
             JavaI420Buffer i420Buffer = JavaI420Buffer.allocate(width, height);
@@ -479,28 +705,23 @@ public class LiveKitStreamManager {
         }
     }
 
-    private void configureAudioOutput() {
-        new Handler(Looper.getMainLooper()).post(() -> {
-            try {
-                android.media.AudioManager audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-                if (audioManager != null) {
-                    audioManager.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
-                    // Si no tiene auriculares conectados por cable ni bluetooth, activar altavoz para que se escuche fuerte
-                    if (!audioManager.isWiredHeadsetOn() && !audioManager.isBluetoothA2dpOn() && !audioManager.isBluetoothScoOn()) {
-                        audioManager.setSpeakerphoneOn(true);
-                        Log.d(TAG, "Altavoz activado para recepción de audio de la PC");
-                    }
-                    int maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL);
-                    int curVol = audioManager.getStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL);
-                    if (curVol < (int)(maxVol * 0.6)) {
-                        audioManager.setStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL, (int)(maxVol * 0.70), 0);
-                    }
-                    Log.d(TAG, "Audio de comunicación configurado exitosamente");
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Aviso configurando salida de audio:", e);
+    /**
+     * Fuerza el volumen de llamada al máximo disponible.
+     * Se llama en cada evento de audio nuevo para asegurar que todos los participantes
+     * sean escuchados con el volumen correcto en modo conferencia.
+     */
+    private void forceMaxCallVolume() {
+        try {
+            android.media.AudioManager audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager != null) {
+                int maxVol = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL);
+                // Siempre poner al 100% para conferencia grupal — el usuario puede bajar desde el HW
+                audioManager.setStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL, maxVol, 0);
+                Log.d(TAG, "🔊 [CONFERENCIA] Volumen de llamada forzado al máximo: " + maxVol + "/" + maxVol);
             }
-        });
+        } catch (Exception e) {
+            Log.w(TAG, "Aviso ajustando volumen de llamada:", e);
+        }
     }
 
     /**
@@ -550,19 +771,50 @@ public class LiveKitStreamManager {
     }
 
     /**
-     * Detiene el streaming y desconecta la sesión de LiveKit.
+     * Elimina activamente la sala en LiveKit Cloud vía API REST Twirp al colgar o detener.
+     * Esto expulsa de inmediato a cualquier participante colgado y libera los cupos de LiveKit en 0 segundos.
+     */
+    private void deleteRoomViaApi(final String roomName) {
+        if (roomName == null || roomName.trim().isEmpty()) return;
+        new Thread(() -> {
+            try {
+                String adminToken = LiveKitTokenGenerator.createAdminToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
+                String apiUrl = LIVEKIT_URL.replace("wss://", "https://").replace("ws://", "http://")
+                        + "/twirp/livekit.RoomService/DeleteRoom";
+                java.net.URL url = new java.net.URL(apiUrl);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Authorization", "Bearer " + adminToken);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+
+                JSONObject body = new JSONObject();
+                body.put("room", roomName.trim());
+                try (java.io.OutputStream os = conn.getOutputStream()) {
+                    os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+                }
+
+                int respCode = conn.getResponseCode();
+                Log.i(TAG, "🧹 Sala '" + roomName + "' eliminada automáticamente de LiveKit Cloud. Código HTTP: " + respCode);
+                conn.disconnect();
+            } catch (Exception e) {
+                Log.w(TAG, "Aviso eliminando sala en LiveKit vía API:", e);
+            }
+        }).start();
+    }
+
+    /**
+     * Detiene el streaming y desconecta la sesión de LiveKit, purgando la sala en la nube.
      */
     public void stopStream() {
-        isConnected = false;
         isExplicitlyStopped = true;
+        final String roomToDelete = currentRoomName;
         currentRoomName = null;
         if (networkManager != null) {
             networkManager.cancelPendingReconnect();
             networkManager.stopMonitoring();
-        }
-        if (roomEventsJob != null) {
-            roomEventsJob.cancel(null);
-            roomEventsJob = null;
         }
         if (audioRouteManager != null) {
             audioRouteManager.stopCallAudio();
@@ -575,25 +827,14 @@ public class LiveKitStreamManager {
             }
         } catch (Exception ignored) {}
 
-        try {
-            if (localVideoTrack != null) {
-                localVideoTrack.stop();
-                localVideoTrack.dispose();
-                localVideoTrack = null;
-            }
-            if (uvcCapturer != null) {
-                uvcCapturer.dispose();
-                uvcCapturer = null;
-            }
-            if (room != null) {
-                room.disconnect();
-                room = null;
+        executor.execute(() -> {
+            teardownCurrentSession();
+            if (roomToDelete != null) {
+                deleteRoomViaApi(roomToDelete);
             }
             if (events != null) events.onDisconnected();
-            Log.d(TAG, "LiveKit stream detenido");
-        } catch (Exception e) {
-            Log.w(TAG, "Aviso cerrando LiveKit", e);
-        }
+            Log.d(TAG, "LiveKit stream detenido y sala purgada automáticamente.");
+        });
     }
 
     public boolean isConnected() {

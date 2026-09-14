@@ -55,7 +55,7 @@ export async function createAdminToken(): Promise<string> {
     sub: 'monitor-admin',
     nbf: now - 5,
     exp: now + 300,
-    video: { roomList: true },
+    video: { roomList: true, roomAdmin: true, roomCreate: true },
   })
 }
 
@@ -86,4 +86,30 @@ export async function createViewerToken(roomName: string): Promise<string> {
       canSubscribe: true,
     },
   })
+}
+
+/**
+ * Elimina y purga una sala de LiveKit Cloud de forma totalmente automática vía Twirp API.
+ * Desconecta participantes colgados y libera los cupos de LiveKit al instante.
+ */
+export async function deleteLiveKitRoom(roomName: string): Promise<boolean> {
+  const cleanRoom = (roomName || '').trim()
+  if (!cleanRoom) return false
+
+  try {
+    const res = await fetch(`/api/livekit/rooms?room=${encodeURIComponent(cleanRoom)}`, {
+      method: 'DELETE',
+    })
+
+    if (res.ok) {
+      console.log(`[AutoDelete] 🧹 Sala "${cleanRoom}" eliminada de LiveKit Cloud automáticamente.`)
+      return true
+    } else {
+      console.warn(`[AutoDelete] Aviso al eliminar sala "${cleanRoom}": HTTP ${res.status}`)
+      return false
+    }
+  } catch (err) {
+    console.warn(`[AutoDelete] Error eliminando sala "${cleanRoom}":`, err)
+    return false
+  }
 }

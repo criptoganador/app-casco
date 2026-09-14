@@ -224,7 +224,7 @@ function PopoutContent() {
         </header>
         <main className="flex-1 min-h-0 relative bg-slate-950">
           <SidebarRooms
-            currentRoomName={roomName}
+            connectedRoomNames={[roomName]}
             participants={allParticipants}
             isOpen={true}
             isPolling={false}
